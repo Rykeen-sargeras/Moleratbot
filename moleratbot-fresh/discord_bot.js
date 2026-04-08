@@ -1030,6 +1030,21 @@ async function handleStaffCommands(message) {
         return;
     }
     
+    // Online/Offline commands
+    if (command === 'online') {
+        await client.user.setStatus('online');
+        await message.channel.send('✅ **The Bot Online and ready to work!**');
+        addAuditLog('Bot Status', message.author, 'Set bot status to ONLINE', 'success');
+        return;
+    }
+    
+    if (command === 'offline') {
+        await client.user.setStatus('invisible');
+        await message.channel.send('⚠️ **Bot Is Powering down Message staff with issues.**');
+        addAuditLog('Bot Status', message.author, 'Set bot status to OFFLINE', 'warning');
+        return;
+    }
+    
     // Role management commands still work
     if (command === 'help') {
         await sendHelpMessage(message);
