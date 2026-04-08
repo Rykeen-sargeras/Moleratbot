@@ -712,99 +712,142 @@ async function handleDMTicket(message) {
     const userId = message.author.id;
     const userState = userStates.get(userId);
     
-    // Initial DM - show menu
-    if (!userState) {
-        const embed = new Discord.EmbedBuilder()
-            .setColor('#5865F2')
-            .setTitle('🎫 Support Ticket System')
-            .setDescription('Please select the type of ticket you want to create:')
-            .addFields(
-                { name: '💻 Tech Support', value: 'Type `tech` for technical issues or help' },
-                { name: '🚨 Report', value: 'Type `report` to report a user or issue' }
-            );
-        
-        await message.reply({ embeds: [embed] });
-        
-        userStates.set(userId, { step: 'ticket_type' });
-        return;
-    }
-    
-    // Handle ticket type selection
-    if (userState.step === 'ticket_type') {
-        const type = message.content.toLowerCase().trim();
-        
-        if (type === 'tech') {
-            userState.ticketType = 'tech';
-            userState.step = 'tech_description';
-            await message.reply('📝 Please describe your technical issue in detail:');
-        } else if (type === 'report') {
-            userState.ticketType = 'report';
-            userState.step = 'report_who';
-            await message.reply('👤 Who are you reporting? (Username, ID, or @mention)');
-        } else {
-            await message.reply('❌ Invalid option. Please type `tech` or `report`');
+    try {
+        // Initial DM - show menu (only if no ticket state exists)
+        // Check for 'step' property to avoid conflict with role selection state
+        if (!userState || !userState.step) {
+            const embed = new Discord.EmbedBuilder()
+                .setColor('#5865F2')
+                .setTitle('🎫 Support Ticket System')
+                .setDescription('Please select the type of ticket you want to create:')
+                .addFields(
+                    { name: '💻 Tech Support', value: 'Type `tech` for technical issues or help' },
+                    { name: '🚨 Report', value: 'Type `report` to report a user or issue' }
+                );
+            
+            await message.reply({ embeds: [embed] });
+            
+            userStates.set(userId, { step: 'ticket_type' });
+            return;
         }
-        return;
-    }
-    
-    // Tech ticket flow
-    if (userState.step === 'tech_description') {
-        userState.description = message.content;
-        await createTechTicket(message.author, userState);
+        
+        // Handle ticket type selection
+        if (userState.step === 'ticket_type') {
+            const type = message.content.toLowerCase().trim();
+            
+            if (type === 'tech') {
+                userState.ticketType = 'tech';
+                userState.step = 'tech_description';
+                await message.reply('📝 Please describe your technical issue in detail:');
+            } else if (type === 'report') {
+                userState.ticketType = 'report';
+                userState.step = 'report_who';
+                await message.reply('👤 Who are you reporting? (Username, ID, or @mention)');
+            } else {
+                await message.reply('❌ Invalid option. Please type `tech` or `report`');
+            }
+            return;
+        }
+        
+        // Tech ticket flow
+        if (userState.step === 'tech_description') {
+            userState.description = message.content;
+            await createTechTicket(message.author, userState);
+            userStates.delete(userId);
+            return;
+        }
+        
+        // Report ticket flow
+        if (userState.step === 'report_who') {
+            userState.reportWho = message.content;
+            userState.step = 'report_what';
+            await message.reply('📄 What happened? Please describe the incident:');
+            return;
+        }
+        
+        if (userState.step === 'report_what') {
+            userState.reportWhat = message.content;
+            userState.step = 'report_proof';
+            await message.reply('📸 Please provide proof (screenshots, message links, etc.):');
+            return;
+        }
+        
+        if (userState.step === 'report_proof') {
+            userState.reportProof = message.content;
+            await createReportTicket(message.author, userState);
+            userStates.delete(userId);
+            return;
+        }
+    } catch (error) {
+        console.error('❌ Error in DM ticket system:', error);
         userStates.delete(userId);
-        return;
-    }
-    
-    // Report ticket flow
-    if (userState.step === 'report_who') {
-        userState.reportWho = message.content;
-        userState.step = 'report_what';
-        await message.reply('📄 What happened? Please describe the incident:');
-        return;
-    }
-    
-    if (userState.step === 'report_what') {
-        userState.reportWhat = message.content;
-        userState.step = 'report_proof';
-        await message.reply('📸 Please provide proof (screenshots, message links, etc.):');
-        return;
-    }
-    
-    if (userState.step === 'report_proof') {
-        userState.reportProof = message.content;
-        await createReportTicket(message.author, userState);
-        userStates.delete(userId);
-        return;
+        try {
+            await message.reply('❌ Something went wrong with the ticket system. Please try again or contact a staff member directly.');
+        } catch (e) {
+            console.error('❌ Could not send error message to user:', e);
+        }
     }
 }
 
 async function createTechTicket(user, state) {
-    const guild = client.guilds.cache.first(); // Get the first guild
-    if (!guild) return;
+    const guild = client.guilds.cache.first();
+    if (!guild) {
+        console.error('❌ Cannot create ticket: Bot is not in any guild');
+        await user.send('❌ There was an error creating your ticket. The bot is not connected to a server.');
+        return;
+    }
+    
+    console.log(`📝 Creating tech ticket for ${user.tag} in guild ${guild.name}`);
+    console.log(`   TICKET_CATEGORY_ID: ${CONFIG.TICKET_CATEGORY_ID || 'NOT SET'}`);
+    console.log(`   STAFF_ROLE_IDS: ${CONFIG.STAFF_ROLE_IDS.length > 0 ? CONFIG.STAFF_ROLE_IDS.join(', ') : 'NOT SET'}`);
     
     const ticketNumber = Math.floor(Math.random() * 9999);
     const channelName = `tech-${ticketNumber}`;
     
     try {
-        const channel = await guild.channels.create({
-            name: channelName,
-            type: Discord.ChannelType.GuildText,
-            parent: CONFIG.TICKET_CATEGORY_ID || null,
-            permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: [Discord.PermissionFlagsBits.ViewChannel],
-                },
-                {
-                    id: user.id,
-                    allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
-                },
-                ...CONFIG.STAFF_ROLE_IDS.map(roleId => ({
+        // Build permission overwrites - only include valid role IDs
+        const permissionOverwrites = [
+            {
+                id: guild.id,
+                deny: [Discord.PermissionFlagsBits.ViewChannel],
+            },
+            {
+                id: user.id,
+                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
+            },
+        ];
+        
+        // Only add staff role overwrites if roles are configured
+        for (const roleId of CONFIG.STAFF_ROLE_IDS) {
+            const role = guild.roles.cache.get(roleId);
+            if (role) {
+                permissionOverwrites.push({
                     id: roleId,
                     allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
-                })),
-            ],
-        });
+                });
+            } else {
+                console.warn(`⚠️ Staff role ID ${roleId} not found in guild`);
+            }
+        }
+        
+        const channelOptions = {
+            name: channelName,
+            type: Discord.ChannelType.GuildText,
+            permissionOverwrites,
+        };
+        
+        // Only set parent if TICKET_CATEGORY_ID is configured and valid
+        if (CONFIG.TICKET_CATEGORY_ID) {
+            const category = guild.channels.cache.get(CONFIG.TICKET_CATEGORY_ID);
+            if (category) {
+                channelOptions.parent = CONFIG.TICKET_CATEGORY_ID;
+            } else {
+                console.warn(`⚠️ TICKET_CATEGORY_ID ${CONFIG.TICKET_CATEGORY_ID} not found - creating without category`);
+            }
+        }
+        
+        const channel = await guild.channels.create(channelOptions);
+        console.log(`✅ Tech ticket channel created: #${channel.name}`);
         
         addAuditLog('Ticket Created', { tag: user.tag, id: user.id }, `Tech ticket #${ticketNumber} - ${state.description.substring(0, 50)}...`, 'info');
         
@@ -818,42 +861,76 @@ async function createTechTicket(user, state) {
             .setFooter({ text: 'Staff: use !close to archive and close this ticket' })
             .setTimestamp();
         
-        await channel.send({ content: `${user} - Support staff will assist you shortly!`, embeds: [embed] });
+        await channel.send({ content: `<@${user.id}> - Support staff will assist you shortly!`, embeds: [embed] });
         
         await user.send(`✅ Your tech support ticket has been created: <#${channel.id}>`);
     } catch (error) {
-        console.error('Error creating tech ticket:', error);
-        await user.send('❌ There was an error creating your ticket. Please contact a staff member directly.');
+        console.error('❌ Error creating tech ticket:', error);
+        try {
+            await user.send('❌ There was an error creating your ticket. Please contact a staff member directly.');
+        } catch (e) {
+            console.error('❌ Could not DM user about ticket error:', e);
+        }
     }
 }
 
 async function createReportTicket(user, state) {
     const guild = client.guilds.cache.first();
-    if (!guild) return;
+    if (!guild) {
+        console.error('❌ Cannot create report: Bot is not in any guild');
+        await user.send('❌ There was an error creating your report. The bot is not connected to a server.');
+        return;
+    }
+    
+    console.log(`📝 Creating report ticket for ${user.tag} in guild ${guild.name}`);
     
     const ticketNumber = Math.floor(Math.random() * 9999);
     const channelName = `report-${ticketNumber}`;
     
     try {
-        const channel = await guild.channels.create({
-            name: channelName,
-            type: Discord.ChannelType.GuildText,
-            parent: CONFIG.TICKET_CATEGORY_ID || null,
-            permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: [Discord.PermissionFlagsBits.ViewChannel],
-                },
-                {
-                    id: user.id,
-                    allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
-                },
-                ...CONFIG.STAFF_ROLE_IDS.map(roleId => ({
+        // Build permission overwrites - only include valid role IDs
+        const permissionOverwrites = [
+            {
+                id: guild.id,
+                deny: [Discord.PermissionFlagsBits.ViewChannel],
+            },
+            {
+                id: user.id,
+                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
+            },
+        ];
+        
+        for (const roleId of CONFIG.STAFF_ROLE_IDS) {
+            const role = guild.roles.cache.get(roleId);
+            if (role) {
+                permissionOverwrites.push({
                     id: roleId,
                     allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages],
-                })),
-            ],
-        });
+                });
+            } else {
+                console.warn(`⚠️ Staff role ID ${roleId} not found in guild`);
+            }
+        }
+        
+        const channelOptions = {
+            name: channelName,
+            type: Discord.ChannelType.GuildText,
+            permissionOverwrites,
+        };
+        
+        if (CONFIG.TICKET_CATEGORY_ID) {
+            const category = guild.channels.cache.get(CONFIG.TICKET_CATEGORY_ID);
+            if (category) {
+                channelOptions.parent = CONFIG.TICKET_CATEGORY_ID;
+            } else {
+                console.warn(`⚠️ TICKET_CATEGORY_ID ${CONFIG.TICKET_CATEGORY_ID} not found - creating without category`);
+            }
+        }
+        
+        const channel = await guild.channels.create(channelOptions);
+        console.log(`✅ Report ticket channel created: #${channel.name}`);
+        
+        addAuditLog('Report Created', { tag: user.tag, id: user.id }, `Report ticket #${ticketNumber}`, 'warning');
         
         const embed = new Discord.EmbedBuilder()
             .setColor('#FF0000')
@@ -867,12 +944,16 @@ async function createReportTicket(user, state) {
             .setFooter({ text: 'Moderators: use !close to archive and close this ticket' })
             .setTimestamp();
         
-        await channel.send({ content: `${user} - Moderators will review your report.`, embeds: [embed] });
+        await channel.send({ content: `<@${user.id}> - Moderators will review your report.`, embeds: [embed] });
         
         await user.send(`✅ Your report ticket has been created: <#${channel.id}>`);
     } catch (error) {
-        console.error('Error creating report ticket:', error);
-        await user.send('❌ There was an error creating your report. Please contact a moderator directly.');
+        console.error('❌ Error creating report ticket:', error);
+        try {
+            await user.send('❌ There was an error creating your report. Please contact a moderator directly.');
+        } catch (e) {
+            console.error('❌ Could not DM user about report error:', e);
+        }
     }
 }
 
