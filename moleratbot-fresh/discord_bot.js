@@ -752,20 +752,22 @@ const REPORT_CATEGORY_ID = '1476547355355512872';
 const OLD_REPORTS_CHANNEL_ID = '1476126314166484994';
 
 client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'report') return;
-    
-    const reportedUser = interaction.options.getString('user');
-    const reason = interaction.options.getString('reason');
-    const reporter = interaction.user;
-    const guild = interaction.guild;
-    
-    console.log(`📝 /report used by ${reporter.tag} - Reporting: ${reportedUser} - Reason: ${reason}`);
-    
-    // Reply immediately (ephemeral = only they can see it)
-    await interaction.reply({ content: '🔄 Creating your report...', ephemeral: true });
-    
     try {
+        if (!interaction.isChatInputCommand()) return;
+        if (interaction.commandName !== 'report') return;
+        
+        console.log(`📝 /report interaction received from ${interaction.user?.tag}`);
+        
+        // Defer reply immediately (must respond within 3 seconds)
+        await interaction.deferReply({ ephemeral: true });
+        
+        const reportedUser = interaction.options.getString('user');
+        const reason = interaction.options.getString('reason');
+        const reporter = interaction.user;
+        const guild = interaction.guild;
+        
+        console.log(`📝 /report - Reporting: ${reportedUser} - Reason: ${reason}`);
+        
         const ticketNumber = Math.floor(Math.random() * 9999);
         const channelName = `report-${ticketNumber}`;
         
@@ -822,9 +824,16 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `✅ Your report has been created! Head to <#${channel.id}> to chat with the mods.` });
         
     } catch (error) {
-        console.error('❌ Error creating report:', error);
-        console.error('   Make sure category ID 1476547355355512872 exists and bot has Manage Channels permission');
-        await interaction.editReply({ content: '❌ Error creating the report. Please contact a staff member directly.' });
+        console.error('❌ Error in /report command:', error);
+        try {
+            if (interaction.deferred) {
+                await interaction.editReply({ content: '❌ Error creating the report. Please contact a staff member directly.' });
+            } else {
+                await interaction.reply({ content: '❌ Error creating the report. Please contact a staff member directly.', ephemeral: true });
+            }
+        } catch (e) {
+            console.error('❌ Could not send error reply:', e);
+        }
     }
 });
 
