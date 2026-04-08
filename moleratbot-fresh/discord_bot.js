@@ -8,10 +8,17 @@ const client = new Discord.Client({
         Discord.GatewayIntentBits.Guilds,
         Discord.GatewayIntentBits.GuildMembers,
         Discord.GatewayIntentBits.DirectMessages,
+        Discord.GatewayIntentBits.DirectMessageReactions,
+        Discord.GatewayIntentBits.DirectMessageTyping,
         Discord.GatewayIntentBits.MessageContent,
         Discord.GatewayIntentBits.GuildMessages,
     ],
-    partials: [Discord.Partials.Channel, Discord.Partials.Message]
+    partials: [
+        Discord.Partials.Channel,
+        Discord.Partials.Message,
+        Discord.Partials.User,
+        Discord.Partials.GuildMember,
+    ]
 });
 
 // Configuration - Set these in Railway environment variables
@@ -391,10 +398,25 @@ client.on('guildMemberAdd', async (member) => {
 // ======================
 
 client.on('messageCreate', async (message) => {
-    // Ignore bots and DMs for address detection
+    // Debug: log ALL incoming messages so we can see if DMs arrive
+    console.log(`📩 Message received - Author: ${message.author?.tag || 'unknown'} | Guild: ${message.guild?.name || 'DM'} | Content: ${message.content?.substring(0, 50) || '[empty]'} | Channel Type: ${message.channel.type}`);
+    
+    // Handle partial messages (needed for DMs in discord.js v14)
+    if (message.partial) {
+        try {
+            await message.fetch();
+        } catch (error) {
+            console.error('❌ Could not fetch partial message:', error);
+            return;
+        }
+    }
+    
+    // Ignore bots
     if (message.author.bot) return;
+    
+    // DM handling
     if (!message.guild) {
-        // Handle DM Ticket System
+        console.log(`📩 DM detected from ${message.author.tag} - routing to handleDMTicket`);
         await handleDMTicket(message);
         return;
     }
