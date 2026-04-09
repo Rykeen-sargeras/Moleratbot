@@ -778,6 +778,7 @@ client.on('interactionCreate', async (interaction) => {
         const guild = interaction.guild;
         
         console.log(`📝 /report - Reporting: ${reportedUser} - Reason: ${reason}`);
+        console.log(`   Staff Role IDs: ${CONFIG.STAFF_ROLE_IDS.join(', ') || 'NONE'}`);
         
         const ticketNumber = Math.floor(Math.random() * 9999);
         const channelName = `report-${ticketNumber}`;
@@ -827,7 +828,8 @@ client.on('interactionCreate', async (interaction) => {
             .setFooter({ text: 'Use !close to archive this report' })
             .setTimestamp();
         
-        await channel.send({ content: `<@${reporter.id}> — Mods will be with you shortly. You can chat here.`, embeds: [embed] });
+        // Ping mod roles and the reporter
+        await channel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${reporter.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
         
         addAuditLog('Report Created', { tag: reporter.tag, id: reporter.id }, `Report #${ticketNumber} against ${reportedUser}`, 'warning');
         
