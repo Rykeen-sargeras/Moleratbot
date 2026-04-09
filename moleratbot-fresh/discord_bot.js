@@ -348,8 +348,14 @@ client.on('ready', async () => {
     console.log(`📊 Dashboard available at: http://localhost:10000`);
     addAuditLog('Bot Started', client.user, `Bot logged in as ${client.user.tag}`, 'success');
     
-    // Register slash commands
+    // Register slash commands using REST API
     try {
+        console.log('📝 Registering slash commands...');
+        console.log(`   Application ID: ${client.user.id}`);
+        
+        const { REST, Routes } = require('discord.js');
+        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN || 'YOUR_BOT_TOKEN_HERE');
+        
         const commands = [
             new Discord.SlashCommandBuilder()
                 .setName('report')
@@ -362,10 +368,15 @@ client.on('ready', async () => {
                     option.setName('reason')
                         .setDescription('Why are you reporting them?')
                         .setRequired(true))
+                .toJSON()
         ];
         
-        await client.application.commands.set(commands);
-        console.log('✅ Slash commands registered');
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: commands }
+        );
+        
+        console.log('✅ Slash commands registered successfully');
     } catch (error) {
         console.error('❌ Error registering slash commands:', error);
     }
