@@ -783,7 +783,10 @@ client.on('interactionCreate', async (interaction) => {
         const ticketNumber = Math.floor(Math.random() * 9999);
         const channelName = `report-${ticketNumber}`;
         
-        // Build permissions: hidden from everyone, visible to reporter + staff
+        // Build permissions: hidden from everyone, visible to reporter + mod roles
+        const MOD_ROLE_1 = '1475476293058301952';
+        const MOD_ROLE_2 = '1475844551737475257';
+        
         const permissionOverwrites = [
             {
                 id: guild.id,
@@ -793,17 +796,15 @@ client.on('interactionCreate', async (interaction) => {
                 id: reporter.id,
                 allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
             },
+            {
+                id: MOD_ROLE_1,
+                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
+            },
+            {
+                id: MOD_ROLE_2,
+                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
+            },
         ];
-        
-        // Add staff roles
-        for (const roleId of CONFIG.STAFF_ROLE_IDS) {
-            if (guild.roles.cache.has(roleId)) {
-                permissionOverwrites.push({
-                    id: roleId,
-                    allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
-                });
-            }
-        }
         
         const channel = await guild.channels.create({
             name: channelName,
