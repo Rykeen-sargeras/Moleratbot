@@ -433,12 +433,22 @@ client.on('ready', async () => {
                 .toJSON()
         ];
         
-        await rest.put(
-            Routes.applicationCommands(client.user.id),
-            { body: commands }
-        );
-        
-        console.log('✅ Slash commands registered successfully');
+        // Register as guild commands (instant) instead of global (up to 1hr delay)
+        const guild = client.guilds.cache.first();
+        if (guild) {
+            await rest.put(
+                Routes.applicationGuildCommands(client.user.id, guild.id),
+                { body: commands }
+            );
+            console.log(`✅ Slash commands registered for guild: ${guild.name}`);
+        } else {
+            // Fallback to global
+            await rest.put(
+                Routes.applicationCommands(client.user.id),
+                { body: commands }
+            );
+            console.log('✅ Slash commands registered globally');
+        }
     } catch (error) {
         console.error('❌ Error registering slash commands:', error);
     }
