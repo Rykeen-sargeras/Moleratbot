@@ -39,6 +39,48 @@ const CONFIG = {
 const patrolCooldowns = new Map(); // userId -> lastPostTimestamp
 const PATROL_COOLDOWN = 16 * 60 * 60 * 1000; // 16 hours in milliseconds
 
+// ======================
+// BANNED WORDS AUTO-JAIL SYSTEM
+// ======================
+
+// Offense tracking: userId -> count of offenses
+const offenseTracker = new Map();
+
+// Banned words list (editable via dashboard)
+let bannedWords = [
+    // Doxxing related
+    'dox', 'doxx', 'doxxing', 'doxing', 'doxed', 'doxxed', 'doxer', 'doxxer', 'doxxers',
+    // Violence / threats
+    'swat', 'swatting', 'swatted',
+    'kill your self', 'kill youre self', "kill you're self", 'kill yourself',
+    'suicide', 'suicidebait', 'suicide bait',
+    // Racial slurs
+    'nigga', 'nigger', 'niggas', 'niggers', "nigger's", "nigga's",
+    'spic', 'spick', 'spics',
+    'wetback', 'wetbacks',
+    'chink', 'chinks',
+    'gook', 'gooks',
+    'kike', 'kikes',
+    'beaner', 'beaners',
+    'coon', 'coons',
+    'darkie', 'darkies',
+    'jigaboo', 'jiggaboo',
+    'porchmonkey', 'porch monkey',
+    'raghead', 'ragheads',
+    'sandnigger', 'sand nigger',
+    'towelhead', 'towelheads',
+    'zipperhead', 'zipperheads',
+    'cracker', 'crackers',
+    'honky', 'honkey', 'honkies',
+    'gringo', 'gringos',
+    'redskin', 'redskins',
+    'squaw',
+    'camel jockey',
+    'chinaman',
+    'slant eye', 'slanteye',
+    'yellowskin',
+];
+
 // Fun features state
 let triviaEnabled = false;
 let triviaInterval = null;
@@ -368,6 +410,26 @@ client.on('ready', async () => {
                     option.setName('reason')
                         .setDescription('Why are you reporting them?')
                         .setRequired(true))
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('jail')
+                .setDescription('Jail a user - hides all text & voice channels from them')
+                .addUserOption(option =>
+                    option.setName('user')
+                        .setDescription('The user to jail')
+                        .setRequired(true))
+                .addStringOption(option =>
+                    option.setName('reason')
+                        .setDescription('Reason for jailing')
+                        .setRequired(false))
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('unjail')
+                .setDescription('Unjail a user - restores their channel access')
+                .addUserOption(option =>
+                    option.setName('user')
+                        .setDescription('The user to unjail')
+                        .setRequired(true))
                 .toJSON()
         ];
         
@@ -449,6 +511,21 @@ client.on('messageCreate', async (message) => {
     
     // Ignore DMs (reports now use /report slash command)
     if (!message.guild) return;
+    
+    // Staff are exempt from word filter
+    const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
+    const isStaffForFilter = message.member.roles.cache.some(role => 
+        CONFIG.STAFF_ROLE_IDS.includes(role.id) || HARDCODED_STAFF_ROLES.includes(role.id)
+    ) || message.member.permissions.has(Discord.PermissionFlagsBits.Administrator);
+    
+    // Banned word detection (non-staff only)
+    if (!isStaffForFilter) {
+        const bannedWordResult = checkBannedWords(message.content);
+        if (bannedWordResult) {
+            await handleBannedWord(message, bannedWordResult);
+            return;
+        }
+    }
     
     
     // Patrol channel enforcement (16hr cooldown + link filtering)
@@ -634,6 +711,141 @@ async function enforcePatrolRules(message) {
     return { violated: false };
 }
 
+// ======================
+// BANNED WORD CHECKER + AUTO-JAIL
+// ======================
+
+function checkBannedWords(text) {
+    const lowerText = text.toLowerCase();
+    
+    // Check multi-word phrases first (longer matches first)
+    const sortedWords = [...bannedWords].sort((a, b) => b.length - a.length);
+    
+    for (const word of sortedWords) {
+        const lowerWord = word.toLowerCase();
+        // Use word boundary check for single words, includes for phrases
+        if (lowerWord.includes(' ')) {
+            // Multi-word phrase
+            if (lowerText.includes(lowerWord)) return word;
+        } else {
+            // Single word - check with basic boundary detection
+            const regex = new RegExp('\\b' + lowerWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+            if (regex.test(text)) return word;
+        }
+    }
+    return null;
+}
+
+async function handleBannedWord(message, triggeredWord) {
+    const userId = message.author.id;
+    const guild = message.guild;
+    
+    try {
+        // Delete the message
+        await message.delete();
+        console.log(`🚫 Banned word "${triggeredWord}" detected from ${message.author.tag}`);
+        
+        // Track offenses
+        const currentOffenses = (offenseTracker.get(userId) || 0) + 1;
+        offenseTracker.set(userId, currentOffenses);
+        
+        // Determine jail duration based on offense count
+        let jailDuration;
+        let jailLabel;
+        if (currentOffenses === 1) {
+            jailDuration = 5 * 60 * 1000; // 5 minutes
+            jailLabel = '5 minutes (1st offense)';
+        } else if (currentOffenses === 2) {
+            jailDuration = 30 * 60 * 1000; // 30 minutes
+            jailLabel = '30 minutes (2nd offense)';
+        } else {
+            jailDuration = null; // Permanent (until unjailed)
+            jailLabel = 'Permanent (3rd+ offense)';
+        }
+        
+        // Apply jail - deny view on both categories
+        const targetMember = message.member;
+        
+        for (const categoryId of JAIL_CATEGORY_IDS) {
+            try {
+                const category = await guild.channels.fetch(categoryId);
+                if (!category) continue;
+                
+                await category.permissionOverwrites.edit(userId, {
+                    ViewChannel: false,
+                    SendMessages: false,
+                    Connect: false,
+                });
+                
+                const children = guild.channels.cache.filter(ch => ch.parentId === categoryId);
+                for (const [, child] of children) {
+                    await child.permissionOverwrites.edit(userId, {
+                        ViewChannel: false,
+                        SendMessages: false,
+                        Connect: false,
+                    });
+                }
+            } catch (err) {
+                console.error(`❌ Error jailing from category ${categoryId}:`, err);
+            }
+        }
+        
+        // If timed jail, schedule unjail
+        if (jailDuration) {
+            setTimeout(async () => {
+                try {
+                    for (const categoryId of JAIL_CATEGORY_IDS) {
+                        const category = await guild.channels.fetch(categoryId);
+                        if (!category) continue;
+                        
+                        await category.permissionOverwrites.delete(userId).catch(() => {});
+                        
+                        const children = guild.channels.cache.filter(ch => ch.parentId === categoryId);
+                        for (const [, child] of children) {
+                            await child.permissionOverwrites.delete(userId).catch(() => {});
+                        }
+                    }
+                    console.log(`✅ Auto-unjailed ${message.author.tag} after ${jailLabel}`);
+                    addAuditLog('Auto-Unjailed', { tag: message.author.tag, id: userId }, `Auto-unjailed after ${jailLabel}`, 'success');
+                } catch (err) {
+                    console.error('❌ Error auto-unjailing:', err);
+                }
+            }, jailDuration);
+        }
+        
+        // Send embed to mod channel
+        if (CONFIG.MOD_CHANNEL_ID) {
+            try {
+                const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
+                
+                const embed = new Discord.EmbedBuilder()
+                    .setColor('#FF0000')
+                    .setTitle('🚫 Banned Word Auto-Jail')
+                    .setThumbnail(message.author.displayAvatarURL())
+                    .addFields(
+                        { name: 'User', value: `${message.author.tag} (${message.author.id})`, inline: true },
+                        { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
+                        { name: 'Triggered Word', value: `||${triggeredWord}||`, inline: true },
+                        { name: 'Offense #', value: `${currentOffenses}`, inline: true },
+                        { name: 'Jail Duration', value: jailLabel, inline: true },
+                        { name: 'Message Content', value: `||${message.content.substring(0, 200)}||` }
+                    )
+                    .setFooter({ text: jailDuration ? 'Will auto-unjail when time expires' : 'Use /unjail to release' })
+                    .setTimestamp();
+                
+                await modChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257>`, embeds: [embed] });
+            } catch (err) {
+                console.error('❌ Error sending banned word alert to mod channel:', err);
+            }
+        }
+        
+        addAuditLog('Banned Word Jail', { tag: message.author.tag, id: userId }, `Word: "${triggeredWord}" | Offense #${currentOffenses} | Duration: ${jailLabel}`, 'warning');
+        
+    } catch (error) {
+        console.error('❌ Error handling banned word:', error);
+    }
+}
+
 // Address detection patterns - VERY strict to avoid false positives
 const ADDRESS_PATTERNS = [
     // Full US street address (number + street name + street type + optional city/state/zip)
@@ -762,88 +974,26 @@ async function handleAddressDetection(message, address) {
 const REPORT_CATEGORY_ID = '1476547355355512872';
 const OLD_REPORTS_CHANNEL_ID = '1476126314166484994';
 
+const JAIL_CATEGORY_IDS = ['1475375313377689672', '1475375313377689671'];
+
 client.on('interactionCreate', async (interaction) => {
     try {
         if (!interaction.isChatInputCommand()) return;
-        if (interaction.commandName !== 'report') return;
         
-        console.log(`📝 /report interaction received from ${interaction.user?.tag}`);
-        
-        // Defer reply immediately (must respond within 3 seconds)
-        await interaction.deferReply({ ephemeral: true });
-        
-        const reportedUser = interaction.options.getString('user');
-        const reason = interaction.options.getString('reason');
-        const reporter = interaction.user;
-        const guild = interaction.guild;
-        
-        console.log(`📝 /report - Reporting: ${reportedUser} - Reason: ${reason}`);
-        console.log(`   Staff Role IDs: ${CONFIG.STAFF_ROLE_IDS.join(', ') || 'NONE'}`);
-        
-        const ticketNumber = Math.floor(Math.random() * 9999);
-        const channelName = `report-${ticketNumber}`;
-        
-        // Build permissions: hidden from everyone, visible to reporter + mod roles
-        const MOD_ROLE_1 = '1475476293058301952';
-        const MOD_ROLE_2 = '1475844551737475257';
-        
-        const permissionOverwrites = [
-            {
-                id: guild.id,
-                deny: [Discord.PermissionFlagsBits.ViewChannel],
-            },
-            {
-                id: reporter.id,
-                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
-            },
-            {
-                id: MOD_ROLE_1,
-                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
-            },
-            {
-                id: MOD_ROLE_2,
-                allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
-            },
-        ];
-        
-        const channel = await guild.channels.create({
-            name: channelName,
-            type: Discord.ChannelType.GuildText,
-            parent: REPORT_CATEGORY_ID,
-            permissionOverwrites,
-        });
-        
-        console.log(`✅ Report channel created: #${channel.name}`);
-        
-        // Send embed matching the alt detection style
-        const embed = new Discord.EmbedBuilder()
-            .setColor('#FF0000')
-            .setTitle('🚨 New User Report')
-            .setThumbnail(reporter.displayAvatarURL())
-            .addFields(
-                { name: 'Reported By', value: `${reporter.tag} (${reporter.id})`, inline: true },
-                { name: 'Reporting', value: reportedUser, inline: true },
-                { name: 'Reason', value: reason },
-                { name: 'Status', value: '🔍 Awaiting mod review', inline: true }
-            )
-            .setFooter({ text: 'Use !close to archive this report' })
-            .setTimestamp();
-        
-        // Ping mod roles and the reporter
-        await channel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${reporter.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
-        
-        addAuditLog('Report Created', { tag: reporter.tag, id: reporter.id }, `Report #${ticketNumber} against ${reportedUser}`, 'warning');
-        
-        // Update the ephemeral reply
-        await interaction.editReply({ content: `✅ Your report has been created! Head to <#${channel.id}> to chat with the mods.` });
-        
+        if (interaction.commandName === 'report') {
+            await handleReportCommand(interaction);
+        } else if (interaction.commandName === 'jail') {
+            await handleJailCommand(interaction);
+        } else if (interaction.commandName === 'unjail') {
+            await handleUnjailCommand(interaction);
+        }
     } catch (error) {
-        console.error('❌ Error in /report command:', error);
+        console.error('❌ Error in slash command:', error);
         try {
             if (interaction.deferred) {
-                await interaction.editReply({ content: '❌ Error creating the report. Please contact a staff member directly.' });
+                await interaction.editReply({ content: '❌ Something went wrong. Please try again.' });
             } else {
-                await interaction.reply({ content: '❌ Error creating the report. Please contact a staff member directly.', ephemeral: true });
+                await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
             }
         } catch (e) {
             console.error('❌ Could not send error reply:', e);
@@ -852,11 +1002,245 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ======================
+// /REPORT HANDLER
+// ======================
+
+async function handleReportCommand(interaction) {
+    console.log(`📝 /report interaction received from ${interaction.user?.tag}`);
+    
+    await interaction.deferReply({ ephemeral: true });
+    
+    const reportedUser = interaction.options.getString('user');
+    const reason = interaction.options.getString('reason');
+    const reporter = interaction.user;
+    const guild = interaction.guild;
+    
+    console.log(`📝 /report - Reporting: ${reportedUser} - Reason: ${reason}`);
+    console.log(`   Staff Role IDs: ${CONFIG.STAFF_ROLE_IDS.join(', ') || 'NONE'}`);
+    
+    const ticketNumber = Math.floor(Math.random() * 9999);
+    const channelName = `report-${ticketNumber}`;
+    
+    // Build permissions: hidden from everyone, visible to reporter + mod roles
+    const MOD_ROLE_1 = '1475476293058301952';
+    const MOD_ROLE_2 = '1475844551737475257';
+    
+    const permissionOverwrites = [
+        {
+            id: guild.id,
+            deny: [Discord.PermissionFlagsBits.ViewChannel],
+        },
+        {
+            id: reporter.id,
+            allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
+        },
+        {
+            id: MOD_ROLE_1,
+            allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
+        },
+        {
+            id: MOD_ROLE_2,
+            allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory],
+        },
+    ];
+    
+    const channel = await guild.channels.create({
+        name: channelName,
+        type: Discord.ChannelType.GuildText,
+        parent: REPORT_CATEGORY_ID,
+        permissionOverwrites,
+    });
+    
+    console.log(`✅ Report channel created: #${channel.name}`);
+    
+    const embed = new Discord.EmbedBuilder()
+        .setColor('#FF0000')
+        .setTitle('🚨 New User Report')
+        .setThumbnail(reporter.displayAvatarURL())
+        .addFields(
+            { name: 'Reported By', value: `${reporter.tag} (${reporter.id})`, inline: true },
+            { name: 'Reporting', value: reportedUser, inline: true },
+            { name: 'Reason', value: reason },
+            { name: 'Status', value: '🔍 Awaiting mod review', inline: true }
+        )
+        .setFooter({ text: 'Use !close to archive this report' })
+        .setTimestamp();
+    
+    // Ping mod roles and the reporter
+    await channel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${reporter.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
+    
+    addAuditLog('Report Created', { tag: reporter.tag, id: reporter.id }, `Report #${ticketNumber} against ${reportedUser}`, 'warning');
+    
+    await interaction.editReply({ content: `✅ Your report has been created! Head to <#${channel.id}> to chat with the mods.` });
+}
+
+// ======================
+// /JAIL HANDLER
+// ======================
+
+async function handleJailCommand(interaction) {
+    const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
+    const isStaff = interaction.member.roles.cache.some(role => 
+        CONFIG.STAFF_ROLE_IDS.includes(role.id) || HARDCODED_STAFF_ROLES.includes(role.id)
+    ) || interaction.member.permissions.has(Discord.PermissionFlagsBits.Administrator);
+    
+    if (!isStaff) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
+    }
+    
+    await interaction.deferReply();
+    
+    const targetUser = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+    const guild = interaction.guild;
+    const targetMember = await guild.members.fetch(targetUser.id);
+    
+    console.log(`🔒 /jail used by ${interaction.user.tag} on ${targetUser.tag}`);
+    
+    let categoriesUpdated = 0;
+    
+    for (const categoryId of JAIL_CATEGORY_IDS) {
+        try {
+            const category = await guild.channels.fetch(categoryId);
+            if (!category) {
+                console.warn(`⚠️ Category ${categoryId} not found`);
+                continue;
+            }
+            
+            // Deny ViewChannel on the category itself
+            await category.permissionOverwrites.edit(targetUser.id, {
+                ViewChannel: false,
+                SendMessages: false,
+                Connect: false,
+            });
+            
+            // Also deny on all child channels inside the category
+            const children = guild.channels.cache.filter(ch => ch.parentId === categoryId);
+            for (const [, child] of children) {
+                await child.permissionOverwrites.edit(targetUser.id, {
+                    ViewChannel: false,
+                    SendMessages: false,
+                    Connect: false,
+                });
+            }
+            
+            categoriesUpdated++;
+            console.log(`✅ Jailed ${targetUser.tag} from category ${category.name}`);
+        } catch (error) {
+            console.error(`❌ Error jailing from category ${categoryId}:`, error);
+        }
+    }
+    
+    // Send embed to the channel
+    const embed = new Discord.EmbedBuilder()
+        .setColor('#FF0000')
+        .setTitle('🔒 User Jailed')
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+            { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+            { name: 'Jailed By', value: `${interaction.user.tag}`, inline: true },
+            { name: 'Reason', value: reason },
+            { name: 'Categories Locked', value: `${categoriesUpdated} of ${JAIL_CATEGORY_IDS.length}`, inline: true }
+        )
+        .setFooter({ text: 'Use /unjail to restore access' })
+        .setTimestamp();
+    
+    await interaction.editReply({ embeds: [embed] });
+    
+    // Also send to mod channel
+    if (CONFIG.MOD_CHANNEL_ID) {
+        try {
+            const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
+            await modChannel.send({ embeds: [embed] });
+        } catch (e) {
+            console.error('❌ Could not send jail alert to mod channel:', e);
+        }
+    }
+    
+    addAuditLog('User Jailed', interaction.user, `Jailed ${targetUser.tag} - Reason: ${reason}`, 'warning');
+}
+
+// ======================
+// /UNJAIL HANDLER
+// ======================
+
+async function handleUnjailCommand(interaction) {
+    const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
+    const isStaff = interaction.member.roles.cache.some(role => 
+        CONFIG.STAFF_ROLE_IDS.includes(role.id) || HARDCODED_STAFF_ROLES.includes(role.id)
+    ) || interaction.member.permissions.has(Discord.PermissionFlagsBits.Administrator);
+    
+    if (!isStaff) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
+    }
+    
+    await interaction.deferReply();
+    
+    const targetUser = interaction.options.getUser('user');
+    const guild = interaction.guild;
+    
+    console.log(`🔓 /unjail used by ${interaction.user.tag} on ${targetUser.tag}`);
+    
+    let categoriesUpdated = 0;
+    
+    for (const categoryId of JAIL_CATEGORY_IDS) {
+        try {
+            const category = await guild.channels.fetch(categoryId);
+            if (!category) continue;
+            
+            // Remove the permission override on the category
+            await category.permissionOverwrites.delete(targetUser.id).catch(() => {});
+            
+            // Remove overrides on all child channels too
+            const children = guild.channels.cache.filter(ch => ch.parentId === categoryId);
+            for (const [, child] of children) {
+                await child.permissionOverwrites.delete(targetUser.id).catch(() => {});
+            }
+            
+            categoriesUpdated++;
+            console.log(`✅ Unjailed ${targetUser.tag} from category ${category.name}`);
+        } catch (error) {
+            console.error(`❌ Error unjailing from category ${categoryId}:`, error);
+        }
+    }
+    
+    const embed = new Discord.EmbedBuilder()
+        .setColor('#00FF00')
+        .setTitle('🔓 User Unjailed')
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+            { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+            { name: 'Unjailed By', value: `${interaction.user.tag}`, inline: true },
+            { name: 'Categories Restored', value: `${categoriesUpdated} of ${JAIL_CATEGORY_IDS.length}`, inline: true }
+        )
+        .setFooter({ text: 'Channel access has been restored' })
+        .setTimestamp();
+    
+    await interaction.editReply({ embeds: [embed] });
+    
+    if (CONFIG.MOD_CHANNEL_ID) {
+        try {
+            const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
+            await modChannel.send({ embeds: [embed] });
+        } catch (e) {
+            console.error('❌ Could not send unjail alert to mod channel:', e);
+        }
+    }
+    
+    addAuditLog('User Unjailed', interaction.user, `Unjailed ${targetUser.tag}`, 'success');
+}
+
+// ======================
 // STAFF COMMANDS
 // ======================
 
 async function handleStaffCommands(message) {
-    const isStaff = message.member.roles.cache.some(role => CONFIG.STAFF_ROLE_IDS.includes(role.id));
+    const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
+    const isStaff = message.member.roles.cache.some(role => 
+        CONFIG.STAFF_ROLE_IDS.includes(role.id) || HARDCODED_STAFF_ROLES.includes(role.id)
+    );
     if (!isStaff && !message.member.permissions.has(Discord.PermissionFlagsBits.Administrator)) return;
     
     const args = message.content.slice(1).trim().split(/ +/);
@@ -1764,6 +2148,63 @@ function startKeepAliveServer() {
             return;
         }
         
+        // API: Get banned words
+        if (pathname === '/api/banned-words' && req.method === 'GET') {
+            const password = url.searchParams.get('password');
+            if (password !== CONFIG.WEB_DASHBOARD_PASSWORD) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid password' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ words: bannedWords, offenses: Object.fromEntries(offenseTracker) }));
+            return;
+        }
+        
+        // API: Update banned words
+        if (pathname === '/api/banned-words' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+                try {
+                    const data = JSON.parse(body);
+                    if (data.password !== CONFIG.WEB_DASHBOARD_PASSWORD) {
+                        res.writeHead(401, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid password' }));
+                        return;
+                    }
+                    
+                    if (data.action === 'add' && data.word) {
+                        const word = data.word.toLowerCase().trim();
+                        if (!bannedWords.includes(word)) {
+                            bannedWords.push(word);
+                            addAuditLog('Banned Word Added', { tag: 'Web Dashboard', id: 'web' }, `Added: "${word}"`, 'info');
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, words: bannedWords }));
+                    } else if (data.action === 'remove' && data.word) {
+                        const word = data.word.toLowerCase().trim();
+                        bannedWords = bannedWords.filter(w => w.toLowerCase() !== word);
+                        addAuditLog('Banned Word Removed', { tag: 'Web Dashboard', id: 'web' }, `Removed: "${word}"`, 'info');
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, words: bannedWords }));
+                    } else if (data.action === 'reset-offenses' && data.userId) {
+                        offenseTracker.delete(data.userId);
+                        addAuditLog('Offenses Reset', { tag: 'Web Dashboard', id: 'web' }, `Reset offenses for ${data.userId}`, 'info');
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true }));
+                    } else {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid action' }));
+                    }
+                } catch (error) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: error.message }));
+                }
+            });
+            return;
+        }
+        
         // Main dashboard HTML
         if (pathname === '/' || pathname === '/dashboard') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -1955,6 +2396,7 @@ function generateDashboardHTML() {
             <button class="tab" onclick="showTab('actions', this)">⚡ Quick Actions</button>
             <button class="tab" onclick="showTab('audit', this)">📋 Audit Log</button>
             <button class="tab" onclick="showTab('roles', this)">🔐 Roles</button>
+            <button class="tab" onclick="showTab('words', this)">🚫 Banned Words</button>
         </div>
 
         <div id="tab-messages" class="tab-content active">
@@ -2023,6 +2465,25 @@ function generateDashboardHTML() {
                 <div id="rolesContainer"></div>
             </div>
         </div>
+
+        <div id="tab-words" class="tab-content">
+            <div class="card">
+                <h2>🚫 Banned Words (Auto-Jail)</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 16px;">1st offense = 5 min jail | 2nd offense = 30 min jail | 3rd+ = permanent jail</p>
+                <div id="wordsAlert" class="alert"></div>
+                <div class="form-group" style="display: flex; gap: 8px;">
+                    <input type="text" id="newWord" placeholder="Add a new banned word or phrase..." style="flex: 1;">
+                    <button class="btn btn-danger" onclick="addBannedWord()">Add</button>
+                </div>
+                <button class="btn btn-secondary mb-2" onclick="loadBannedWords()">Refresh</button>
+                <div id="bannedWordsList" style="margin-top: 12px;"></div>
+            </div>
+            <div class="card">
+                <h2>Offense Tracker</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 16px;">Users who have triggered banned words</p>
+                <div id="offensesList"></div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -2064,6 +2525,7 @@ function generateDashboardHTML() {
             if (tabName === 'audit') loadAuditLog();
             if (tabName === 'roles') loadRoles();
             if (tabName === 'actions') loadStats();
+            if (tabName === 'words') loadBannedWords();
         }
         
         function showAlert(id, message, type) {
@@ -2327,6 +2789,101 @@ function generateDashboardHTML() {
         
         function formatPermissionName(key) {
             return key.replace(/([A-Z])/g, ' $1').trim().split(' ').map(function(word) { return word.charAt(0).toUpperCase() + word.slice(1); }).join(' ');
+        }
+        
+        // Banned Words functions
+        async function loadBannedWords() {
+            try {
+                const res = await fetch('/api/banned-words?password=' + encodeURIComponent(password));
+                const data = await res.json();
+                if (data.error) return;
+                
+                var container = document.getElementById('bannedWordsList');
+                if (data.words.length === 0) {
+                    container.innerHTML = '<p style="color: var(--text-muted);">No banned words configured</p>';
+                } else {
+                    container.innerHTML = data.words.map(function(word) {
+                        return '<div style="display: inline-flex; align-items: center; gap: 8px; background: var(--bg-tertiary); padding: 8px 12px; border-radius: 6px; margin: 4px; border: 1px solid var(--border);">' +
+                            '<span>' + word + '</span>' +
+                            '<button onclick="removeBannedWord(\\'' + word.replace(/'/g, "\\\\'") + '\\')" style="background: var(--danger); color: white; border: none; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 12px;">X</button>' +
+                        '</div>';
+                    }).join('');
+                }
+                
+                var offContainer = document.getElementById('offensesList');
+                var offEntries = Object.entries(data.offenses || {});
+                if (offEntries.length === 0) {
+                    offContainer.innerHTML = '<p style="color: var(--text-muted);">No offenses recorded</p>';
+                } else {
+                    offContainer.innerHTML = offEntries.map(function(entry) {
+                        var uid = entry[0];
+                        var count = entry[1];
+                        var label = count === 1 ? '5 min jail' : count === 2 ? '30 min jail' : 'Permanent jail';
+                        return '<div style="display: flex; justify-content: space-between; align-items: center; background: var(--bg-tertiary); padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 3px solid var(--warning);">' +
+                            '<div><span style="font-weight: 600;">User ID: ' + uid + '</span><br><span style="color: var(--text-secondary); font-size: 13px;">Offenses: ' + count + ' (' + label + ')</span></div>' +
+                            '<button onclick="resetOffenses(\\'' + uid + '\\')" class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">Reset</button>' +
+                        '</div>';
+                    }).join('');
+                }
+            } catch (err) {
+                console.error('Error loading banned words:', err);
+            }
+        }
+        
+        async function addBannedWord() {
+            var word = document.getElementById('newWord').value.trim();
+            if (!word) return showAlert('wordsAlert', 'Enter a word or phrase', 'error');
+            try {
+                var res = await fetch('/api/banned-words', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password, action: 'add', word: word })
+                });
+                var data = await res.json();
+                if (data.success) {
+                    showAlert('wordsAlert', 'Added: ' + word, 'success');
+                    document.getElementById('newWord').value = '';
+                    loadBannedWords();
+                } else {
+                    showAlert('wordsAlert', data.error, 'error');
+                }
+            } catch (err) {
+                showAlert('wordsAlert', 'Error: ' + err.message, 'error');
+            }
+        }
+        
+        async function removeBannedWord(word) {
+            try {
+                var res = await fetch('/api/banned-words', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password, action: 'remove', word: word })
+                });
+                var data = await res.json();
+                if (data.success) {
+                    showAlert('wordsAlert', 'Removed: ' + word, 'success');
+                    loadBannedWords();
+                }
+            } catch (err) {
+                showAlert('wordsAlert', 'Error: ' + err.message, 'error');
+            }
+        }
+        
+        async function resetOffenses(userId) {
+            try {
+                var res = await fetch('/api/banned-words', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password, action: 'reset-offenses', userId: userId })
+                });
+                var data = await res.json();
+                if (data.success) {
+                    showAlert('wordsAlert', 'Offenses reset for ' + userId, 'success');
+                    loadBannedWords();
+                }
+            } catch (err) {
+                showAlert('wordsAlert', 'Error: ' + err.message, 'error');
+            }
         }
         
         setInterval(function() {
