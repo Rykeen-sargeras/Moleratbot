@@ -433,6 +433,13 @@ client.on('ready', async () => {
                 .toJSON()
         ];
         
+        // Clear old global commands (removes duplicates)
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: [] }
+        );
+        console.log('✅ Cleared old global commands');
+        
         // Register as guild commands (instant) instead of global (up to 1hr delay)
         const guild = client.guilds.cache.first();
         if (guild) {
@@ -776,6 +783,15 @@ async function handleBannedWord(message, triggeredWord) {
         // Apply jail - deny view on both categories
         const targetMember = message.member;
         
+        // Assign jail role
+        const JAIL_ROLE_ID = '1493335204419473438';
+        try {
+            await targetMember.roles.add(JAIL_ROLE_ID);
+            console.log(`✅ Jail role added to ${message.author.tag} (auto-jail)`);
+        } catch (err) {
+            console.error('❌ Error adding jail role:', err);
+        }
+        
         for (const categoryId of JAIL_CATEGORY_IDS) {
             try {
                 const category = await guild.channels.fetch(categoryId);
@@ -815,6 +831,15 @@ async function handleBannedWord(message, triggeredWord) {
                             await child.permissionOverwrites.delete(userId).catch(() => {});
                         }
                     }
+                    // Remove jail role
+                    try {
+                        const member = await guild.members.fetch(userId);
+                        await member.roles.remove('1493335204419473438');
+                        console.log(`✅ Jail role removed from ${message.author.tag} (auto-unjail)`);
+                    } catch (roleErr) {
+                        console.error('❌ Error removing jail role on auto-unjail:', roleErr);
+                    }
+                    
                     console.log(`✅ Auto-unjailed ${message.author.tag} after ${jailLabel}`);
                     addAuditLog('Auto-Unjailed', { tag: message.author.tag, id: userId }, `Auto-unjailed after ${jailLabel}`, 'success');
                 } catch (err) {
@@ -823,29 +848,30 @@ async function handleBannedWord(message, triggeredWord) {
             }, jailDuration);
         }
         
-        // Send embed to mod channel
-        if (CONFIG.MOD_CHANNEL_ID) {
+        // Send embed to jail log channels
+        const JAIL_LOG_CHANNELS = ['1475470248487424206', '1476126314166484994'];
+        
+        const embed = new Discord.EmbedBuilder()
+            .setColor('#FF0000')
+            .setTitle('🚫 Banned Word Auto-Jail')
+            .setThumbnail(message.author.displayAvatarURL())
+            .addFields(
+                { name: 'User', value: `${message.author.tag} (${message.author.id})`, inline: true },
+                { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
+                { name: 'Triggered Word', value: `||${triggeredWord}||`, inline: true },
+                { name: 'Offense #', value: `${currentOffenses}`, inline: true },
+                { name: 'Jail Duration', value: jailLabel, inline: true },
+                { name: 'Message Content', value: `||${message.content.substring(0, 200)}||` }
+            )
+            .setFooter({ text: jailDuration ? 'Will auto-unjail when time expires' : 'Use /unjail to release' })
+            .setTimestamp();
+        
+        for (const chanId of JAIL_LOG_CHANNELS) {
             try {
-                const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
-                
-                const embed = new Discord.EmbedBuilder()
-                    .setColor('#FF0000')
-                    .setTitle('🚫 Banned Word Auto-Jail')
-                    .setThumbnail(message.author.displayAvatarURL())
-                    .addFields(
-                        { name: 'User', value: `${message.author.tag} (${message.author.id})`, inline: true },
-                        { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
-                        { name: 'Triggered Word', value: `||${triggeredWord}||`, inline: true },
-                        { name: 'Offense #', value: `${currentOffenses}`, inline: true },
-                        { name: 'Jail Duration', value: jailLabel, inline: true },
-                        { name: 'Message Content', value: `||${message.content.substring(0, 200)}||` }
-                    )
-                    .setFooter({ text: jailDuration ? 'Will auto-unjail when time expires' : 'Use /unjail to release' })
-                    .setTimestamp();
-                
-                await modChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257>`, embeds: [embed] });
+                const logChan = await client.channels.fetch(chanId);
+                await logChan.send({ content: `<@&1475476293058301952> <@&1475844551737475257>`, embeds: [embed] });
             } catch (err) {
-                console.error('❌ Error sending banned word alert to mod channel:', err);
+                console.error(`❌ Error sending banned word alert to channel ${chanId}:`, err);
             }
         }
         
@@ -1108,6 +1134,15 @@ async function handleJailCommand(interaction) {
     
     console.log(`🔒 /jail used by ${interaction.user.tag} on ${targetUser.tag}`);
     
+    // Assign jail role
+    const JAIL_ROLE_ID = '1493335204419473438';
+    try {
+        await targetMember.roles.add(JAIL_ROLE_ID);
+        console.log(`✅ Jail role added to ${targetUser.tag}`);
+    } catch (err) {
+        console.error('❌ Error adding jail role:', err);
+    }
+    
     let categoriesUpdated = 0;
     
     for (const categoryId of JAIL_CATEGORY_IDS) {
@@ -1158,13 +1193,14 @@ async function handleJailCommand(interaction) {
     
     await interaction.editReply({ embeds: [embed] });
     
-    // Also send to mod channel
-    if (CONFIG.MOD_CHANNEL_ID) {
+    // Send to jail log channels
+    const JAIL_LOG_CHANNELS = ['1475470248487424206', '1476126314166484994'];
+    for (const chanId of JAIL_LOG_CHANNELS) {
         try {
-            const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
-            await modChannel.send({ embeds: [embed] });
+            const logChan = await client.channels.fetch(chanId);
+            await logChan.send({ embeds: [embed] });
         } catch (e) {
-            console.error('❌ Could not send jail alert to mod channel:', e);
+            console.error(`❌ Could not send jail alert to channel ${chanId}:`, e);
         }
     }
     
@@ -1192,6 +1228,16 @@ async function handleUnjailCommand(interaction) {
     const guild = interaction.guild;
     
     console.log(`🔓 /unjail used by ${interaction.user.tag} on ${targetUser.tag}`);
+    
+    // Remove jail role
+    const JAIL_ROLE_ID = '1493335204419473438';
+    try {
+        const targetMember = await guild.members.fetch(targetUser.id);
+        await targetMember.roles.remove(JAIL_ROLE_ID);
+        console.log(`✅ Jail role removed from ${targetUser.tag}`);
+    } catch (err) {
+        console.error('❌ Error removing jail role:', err);
+    }
     
     let categoriesUpdated = 0;
     
@@ -1230,12 +1276,14 @@ async function handleUnjailCommand(interaction) {
     
     await interaction.editReply({ embeds: [embed] });
     
-    if (CONFIG.MOD_CHANNEL_ID) {
+    // Send to jail log channels
+    const JAIL_LOG_CHANNELS = ['1475470248487424206', '1476126314166484994'];
+    for (const chanId of JAIL_LOG_CHANNELS) {
         try {
-            const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
-            await modChannel.send({ embeds: [embed] });
+            const logChan = await client.channels.fetch(chanId);
+            await logChan.send({ embeds: [embed] });
         } catch (e) {
-            console.error('❌ Could not send unjail alert to mod channel:', e);
+            console.error(`❌ Could not send unjail alert to channel ${chanId}:`, e);
         }
     }
     
