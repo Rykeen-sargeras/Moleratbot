@@ -7,6 +7,7 @@ const client = new Discord.Client({
     intents: [
         Discord.GatewayIntentBits.Guilds,
         Discord.GatewayIntentBits.GuildMembers,
+        Discord.GatewayIntentBits.GuildVoiceStates,
         Discord.GatewayIntentBits.DirectMessages,
         Discord.GatewayIntentBits.DirectMessageReactions,
         Discord.GatewayIntentBits.DirectMessageTyping,
@@ -29,7 +30,7 @@ const CONFIG = {
     LOG_CHANNEL_ID: process.env.LOG_CHANNEL_ID || '',
     TICKET_CATEGORY_ID: process.env.TICKET_CATEGORY_ID || '',
     STAFF_ROLE_IDS: (process.env.STAFF_ROLE_IDS || '').split(',').filter(Boolean),
-    WEB_DASHBOARD_PASSWORD: process.env.WEB_DASHBOARD_PASSWORD || 'admin123', // Set a secure password!
+    WEB_DASHBOARD_PASSWORD: 'THEmatchaman69420',
     ALT_DETECTION_ENABLED: process.env.ALT_DETECTION_ENABLED !== 'false', // Default enabled
     ALT_ACCOUNT_AGE_DAYS: parseInt(process.env.ALT_ACCOUNT_AGE_DAYS || '7'), // Flag accounts newer than 7 days
     PATROL_CHANNEL_ID: '1486376733413347358', // Self-promo channel with 16hr cooldown
@@ -73,6 +74,7 @@ let bannedWords = [
     'cracker', 'crackers',
     'honky', 'honkey', 'honkies',
     'gringo', 'gringos',
+    'redskin', 'redskins',
     'squaw',
     'camel jockey',
     'chinaman',
@@ -502,6 +504,159 @@ client.on('guildMemberAdd', async (member) => {
     } catch (error) {
         console.error('Error in alt detection:', error);
     }
+});
+
+// ======================
+// VOICE CHANNEL TRACKING
+// ======================
+
+const voiceLog = []; // { timestamp, userId, username, action, channelName, duration }
+const MAX_VOICE_LOG = 500;
+const voiceJoinTimes = new Map(); // `${userId}-${channelId}` -> joinTimestamp
+
+client.on('voiceStateUpdate', (oldState, newState) => {
+    const user = newState.member?.user || oldState.member?.user;
+    if (!user || user.bot) return;
+    
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    
+    // User joined a voice channel
+    if (!oldState.channelId && newState.channelId) {
+        const key = `${user.id}-${newState.channelId}`;
+        voiceJoinTimes.set(key, Date.now());
+        
+        voiceLog.unshift({
+            timestamp: now.toISOString(),
+            userId: user.id,
+            username: user.tag,
+            action: 'joined',
+            channelName: newState.channel?.name || 'Unknown',
+            channelId: newState.channelId,
+            duration: null,
+            timeStr: timeStr,
+        });
+        
+        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
+        console.log(`🎤 ${user.tag} joined voice: ${newState.channel?.name} at ${timeStr}`);
+    }
+    
+    // User left a voice channel
+    else if (oldState.channelId && !newState.channelId) {
+        const key = `${user.id}-${oldState.channelId}`;
+        const joinTime = voiceJoinTimes.get(key);
+        let duration = null;
+        
+        if (joinTime) {
+            const durationMs = Date.now() - joinTime;
+            const hours = Math.floor(durationMs / 3600000);
+            const mins = Math.floor((durationMs % 3600000) / 60000);
+            const secs = Math.floor((durationMs % 60000) / 1000);
+            duration = hours > 0 ? `${hours}h ${mins}m ${secs}s` : mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+            voiceJoinTimes.delete(key);
+        }
+        
+        voiceLog.unshift({
+            timestamp: now.toISOString(),
+            userId: user.id,
+            username: user.tag,
+            action: 'left',
+            channelName: oldState.channel?.name || 'Unknown',
+            channelId: oldState.channelId,
+            duration: duration,
+            timeStr: timeStr,
+        });
+        
+        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
+        console.log(`🎤 ${user.tag} left voice: ${oldState.channel?.name} at ${timeStr} - Duration: ${duration || 'unknown'}`);
+    }
+    
+    // User switched channels
+    else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+        // Log leaving old channel
+        const oldKey = `${user.id}-${oldState.channelId}`;
+        const joinTime = voiceJoinTimes.get(oldKey);
+        let duration = null;
+        
+        if (joinTime) {
+            const durationMs = Date.now() - joinTime;
+            const hours = Math.floor(durationMs / 3600000);
+            const mins = Math.floor((durationMs % 3600000) / 60000);
+            const secs = Math.floor((durationMs % 60000) / 1000);
+            duration = hours > 0 ? `${hours}h ${mins}m ${secs}s` : mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+            voiceJoinTimes.delete(oldKey);
+        }
+        
+        voiceLog.unshift({
+            timestamp: now.toISOString(),
+            userId: user.id,
+            username: user.tag,
+            action: 'left',
+            channelName: oldState.channel?.name || 'Unknown',
+            channelId: oldState.channelId,
+            duration: duration,
+            timeStr: timeStr,
+        });
+        
+        // Log joining new channel
+        const newKey = `${user.id}-${newState.channelId}`;
+        voiceJoinTimes.set(newKey, Date.now());
+        
+        voiceLog.unshift({
+            timestamp: now.toISOString(),
+            userId: user.id,
+            username: user.tag,
+            action: 'joined',
+            channelName: newState.channel?.name || 'Unknown',
+            channelId: newState.channelId,
+            duration: null,
+            timeStr: timeStr,
+        });
+        
+        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
+        console.log(`🎤 ${user.tag} switched: ${oldState.channel?.name} -> ${newState.channel?.name} at ${timeStr}`);
+    }
+});
+
+// ======================
+// MEMBER JOIN/LEAVE TRACKING
+// ======================
+
+const memberLog = []; // { timestamp, userId, username, action, timeStr }
+const MAX_MEMBER_LOG = 500;
+
+client.on('guildMemberAdd', async (member) => {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    
+    memberLog.unshift({
+        timestamp: now.toISOString(),
+        userId: member.user.id,
+        username: member.user.tag,
+        action: 'joined',
+        timeStr: timeStr,
+        avatar: member.user.displayAvatarURL(),
+    });
+    
+    if (memberLog.length > MAX_MEMBER_LOG) memberLog.pop();
+    console.log(`📥 ${member.user.tag} joined the server at ${timeStr}`);
+});
+
+client.on('guildMemberRemove', async (member) => {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    
+    memberLog.unshift({
+        timestamp: now.toISOString(),
+        userId: member.user.id,
+        username: member.user.tag,
+        action: 'left',
+        timeStr: timeStr,
+        avatar: member.user.displayAvatarURL(),
+    });
+    
+    if (memberLog.length > MAX_MEMBER_LOG) memberLog.pop();
+    console.log(`📤 ${member.user.tag} left the server at ${timeStr}`);
 });
 
 // ======================
@@ -2347,6 +2502,19 @@ function startKeepAliveServer() {
             return;
         }
         
+        // API: Get voice log
+        if (pathname === '/api/voice-log' && req.method === 'GET') {
+            const password = url.searchParams.get('password');
+            if (password !== CONFIG.WEB_DASHBOARD_PASSWORD) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid password' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ voiceLog: voiceLog.slice(0, 200), memberLog: memberLog.slice(0, 200) }));
+            return;
+        }
+        
         // Main dashboard HTML
         if (pathname === '/' || pathname === '/dashboard') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -2539,6 +2707,7 @@ function generateDashboardHTML() {
             <button class="tab" onclick="showTab('audit', this)">📋 Audit Log</button>
             <button class="tab" onclick="showTab('roles', this)">🔐 Roles</button>
             <button class="tab" onclick="showTab('words', this)">🚫 Banned Words</button>
+            <button class="tab" onclick="showTab('activity', this)">📊 Activity</button>
         </div>
 
         <div id="tab-messages" class="tab-content active">
@@ -2626,6 +2795,18 @@ function generateDashboardHTML() {
                 <div id="offensesList"></div>
             </div>
         </div>
+
+        <div id="tab-activity" class="tab-content">
+            <div class="card">
+                <h2>🎤 Voice Channel Activity</h2>
+                <button class="btn btn-secondary mb-2" onclick="loadActivity()">Refresh</button>
+                <div id="voiceLogContainer" style="max-height: 500px; overflow-y: auto;"></div>
+            </div>
+            <div class="card">
+                <h2>📥 Member Join / Leave Log</h2>
+                <div id="memberLogContainer" style="max-height: 500px; overflow-y: auto;"></div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -2668,6 +2849,7 @@ function generateDashboardHTML() {
             if (tabName === 'roles') loadRoles();
             if (tabName === 'actions') loadStats();
             if (tabName === 'words') loadBannedWords();
+            if (tabName === 'activity') loadActivity();
         }
         
         function showAlert(id, message, type) {
@@ -3028,8 +3210,57 @@ function generateDashboardHTML() {
             }
         }
         
+        // Activity tab functions
+        async function loadActivity() {
+            try {
+                var res = await fetch('/api/voice-log?password=' + encodeURIComponent(password));
+                var data = await res.json();
+                if (data.error) return;
+                
+                // Voice log
+                var vContainer = document.getElementById('voiceLogContainer');
+                if (!data.voiceLog || data.voiceLog.length === 0) {
+                    vContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No voice activity recorded yet</p>';
+                } else {
+                    vContainer.innerHTML = data.voiceLog.map(function(entry) {
+                        var color = entry.action === 'joined' ? 'var(--success)' : 'var(--danger)';
+                        var icon = entry.action === 'joined' ? '🟢' : '🔴';
+                        var durText = entry.duration ? ' — Duration: <strong>' + entry.duration + '</strong>' : '';
+                        var time = new Date(entry.timestamp).toLocaleString();
+                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 6px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
+                            icon + ' <strong>' + entry.username + '</strong> (<span style="color: var(--text-muted);">' + entry.userId + '</span>) ' +
+                            '<span style="color: ' + color + ';">' + entry.action + '</span> ' +
+                            '<strong>#' + entry.channelName + '</strong> at ' + entry.timeStr + durText +
+                            '<span style="color: var(--text-muted); float: right; font-size: 11px;">' + time + '</span>' +
+                        '</div>';
+                    }).join('');
+                }
+                
+                // Member log
+                var mContainer = document.getElementById('memberLogContainer');
+                if (!data.memberLog || data.memberLog.length === 0) {
+                    mContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No member activity recorded yet</p>';
+                } else {
+                    mContainer.innerHTML = data.memberLog.map(function(entry) {
+                        var color = entry.action === 'joined' ? 'var(--success)' : 'var(--danger)';
+                        var icon = entry.action === 'joined' ? '📥' : '📤';
+                        var actionText = entry.action === 'joined' ? 'joined the server' : 'left the server';
+                        var time = new Date(entry.timestamp).toLocaleString();
+                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 6px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
+                            icon + ' <strong>' + entry.username + '</strong> (<span style="color: var(--text-muted);">' + entry.userId + '</span>) ' +
+                            '<span style="color: ' + color + ';">' + actionText + '</span> at ' + entry.timeStr +
+                            '<span style="color: var(--text-muted); float: right; font-size: 11px;">' + time + '</span>' +
+                        '</div>';
+                    }).join('');
+                }
+            } catch (err) {
+                console.error('Error loading activity:', err);
+            }
+        }
+        
         setInterval(function() {
             if (document.getElementById('tab-audit').classList.contains('active')) loadAuditLog();
+            if (document.getElementById('tab-activity').classList.contains('active')) loadActivity();
         }, 10000);
         
         document.addEventListener('DOMContentLoaded', function() {
