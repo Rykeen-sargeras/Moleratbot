@@ -73,7 +73,6 @@ let bannedWords = [
     'cracker', 'crackers',
     'honky', 'honkey', 'honkies',
     'gringo', 'gringos',
-    'redskin', 'redskins',
     'squaw',
     'camel jockey',
     'chinaman',
