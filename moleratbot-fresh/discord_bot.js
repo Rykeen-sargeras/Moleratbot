@@ -510,9 +510,35 @@ client.on('guildMemberAdd', async (member) => {
 // VOICE CHANNEL TRACKING
 // ======================
 
-const voiceLog = []; // { timestamp, userId, username, action, channelName, duration }
-const MAX_VOICE_LOG = 500;
+// Organized by date: 'YYYY-MM-DD' -> [entries]
+const voiceLogs = new Map();
+const memberLogs = new Map();
 const voiceJoinTimes = new Map(); // `${userId}-${channelId}` -> joinTimestamp
+
+function getDateKey(date) {
+    return date.toISOString().split('T')[0]; // 'YYYY-MM-DD'
+}
+
+function addVoiceLog(entry) {
+    const dateKey = getDateKey(new Date(entry.timestamp));
+    if (!voiceLogs.has(dateKey)) voiceLogs.set(dateKey, []);
+    voiceLogs.get(dateKey).unshift(entry);
+    // Keep max 30 days
+    if (voiceLogs.size > 30) {
+        const oldest = Array.from(voiceLogs.keys()).sort()[0];
+        voiceLogs.delete(oldest);
+    }
+}
+
+function addMemberLog(entry) {
+    const dateKey = getDateKey(new Date(entry.timestamp));
+    if (!memberLogs.has(dateKey)) memberLogs.set(dateKey, []);
+    memberLogs.get(dateKey).unshift(entry);
+    if (memberLogs.size > 30) {
+        const oldest = Array.from(memberLogs.keys()).sort()[0];
+        memberLogs.delete(oldest);
+    }
+}
 
 client.on('voiceStateUpdate', (oldState, newState) => {
     const user = newState.member?.user || oldState.member?.user;
@@ -526,7 +552,7 @@ client.on('voiceStateUpdate', (oldState, newState) => {
         const key = `${user.id}-${newState.channelId}`;
         voiceJoinTimes.set(key, Date.now());
         
-        voiceLog.unshift({
+        addVoiceLog({
             timestamp: now.toISOString(),
             userId: user.id,
             username: user.tag,
@@ -536,8 +562,6 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             duration: null,
             timeStr: timeStr,
         });
-        
-        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
         console.log(`🎤 ${user.tag} joined voice: ${newState.channel?.name} at ${timeStr}`);
     }
     
@@ -556,7 +580,7 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             voiceJoinTimes.delete(key);
         }
         
-        voiceLog.unshift({
+        addVoiceLog({
             timestamp: now.toISOString(),
             userId: user.id,
             username: user.tag,
@@ -566,14 +590,11 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             duration: duration,
             timeStr: timeStr,
         });
-        
-        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
         console.log(`🎤 ${user.tag} left voice: ${oldState.channel?.name} at ${timeStr} - Duration: ${duration || 'unknown'}`);
     }
     
     // User switched channels
     else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-        // Log leaving old channel
         const oldKey = `${user.id}-${oldState.channelId}`;
         const joinTime = voiceJoinTimes.get(oldKey);
         let duration = null;
@@ -587,33 +608,22 @@ client.on('voiceStateUpdate', (oldState, newState) => {
             voiceJoinTimes.delete(oldKey);
         }
         
-        voiceLog.unshift({
+        addVoiceLog({
             timestamp: now.toISOString(),
             userId: user.id,
             username: user.tag,
-            action: 'left',
+            action: 'switched',
             channelName: oldState.channel?.name || 'Unknown',
+            toChannel: newState.channel?.name || 'Unknown',
             channelId: oldState.channelId,
             duration: duration,
             timeStr: timeStr,
         });
         
-        // Log joining new channel
+        // Start tracking new channel
         const newKey = `${user.id}-${newState.channelId}`;
         voiceJoinTimes.set(newKey, Date.now());
         
-        voiceLog.unshift({
-            timestamp: now.toISOString(),
-            userId: user.id,
-            username: user.tag,
-            action: 'joined',
-            channelName: newState.channel?.name || 'Unknown',
-            channelId: newState.channelId,
-            duration: null,
-            timeStr: timeStr,
-        });
-        
-        if (voiceLog.length > MAX_VOICE_LOG) voiceLog.pop();
         console.log(`🎤 ${user.tag} switched: ${oldState.channel?.name} -> ${newState.channel?.name} at ${timeStr}`);
     }
 });
@@ -622,23 +632,17 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 // MEMBER JOIN/LEAVE TRACKING
 // ======================
 
-const memberLog = []; // { timestamp, userId, username, action, timeStr }
-const MAX_MEMBER_LOG = 500;
-
 client.on('guildMemberAdd', async (member) => {
     const now = new Date();
     const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
     
-    memberLog.unshift({
+    addMemberLog({
         timestamp: now.toISOString(),
         userId: member.user.id,
         username: member.user.tag,
         action: 'joined',
         timeStr: timeStr,
-        avatar: member.user.displayAvatarURL(),
     });
-    
-    if (memberLog.length > MAX_MEMBER_LOG) memberLog.pop();
     console.log(`📥 ${member.user.tag} joined the server at ${timeStr}`);
 });
 
@@ -646,16 +650,13 @@ client.on('guildMemberRemove', async (member) => {
     const now = new Date();
     const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
     
-    memberLog.unshift({
+    addMemberLog({
         timestamp: now.toISOString(),
         userId: member.user.id,
         username: member.user.tag,
         action: 'left',
         timeStr: timeStr,
-        avatar: member.user.displayAvatarURL(),
     });
-    
-    if (memberLog.length > MAX_MEMBER_LOG) memberLog.pop();
     console.log(`📤 ${member.user.tag} left the server at ${timeStr}`);
 });
 
@@ -2510,8 +2511,21 @@ function startKeepAliveServer() {
                 res.end(JSON.stringify({ error: 'Invalid password' }));
                 return;
             }
+            const dateFilter = url.searchParams.get('date');
+            const today = getDateKey(new Date());
+            const targetDate = dateFilter || today;
+            
+            const voiceDates = Array.from(voiceLogs.keys()).sort().reverse();
+            const memberDates = Array.from(memberLogs.keys()).sort().reverse();
+            const allDates = [...new Set([...voiceDates, ...memberDates])].sort().reverse();
+            
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ voiceLog: voiceLog.slice(0, 200), memberLog: memberLog.slice(0, 200) }));
+            res.end(JSON.stringify({
+                dates: allDates,
+                selectedDate: targetDate,
+                voiceLog: voiceLogs.get(targetDate) || [],
+                memberLog: memberLogs.get(targetDate) || [],
+            }));
             return;
         }
         
@@ -2798,8 +2812,18 @@ function generateDashboardHTML() {
 
         <div id="tab-activity" class="tab-content">
             <div class="card">
+                <h2>📋 Join/Leave Audits</h2>
+                <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 16px;">
+                    <label style="color: var(--text-secondary); font-size: 14px;">Select Date:</label>
+                    <select id="activityDate" onchange="loadActivity()" style="padding: 8px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 14px;">
+                        <option value="">Today</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="loadActivity()" style="padding: 8px 16px;">Refresh</button>
+                    <span id="activityDateLabel" style="color: var(--text-muted); font-size: 13px;"></span>
+                </div>
+            </div>
+            <div class="card">
                 <h2>🎤 Voice Chat Join / Leave Log</h2>
-                <button class="btn btn-secondary mb-2" onclick="loadActivity()">Refresh</button>
                 <div id="voiceLogContainer" style="max-height: 500px; overflow-y: auto;"></div>
             </div>
             <div class="card">
@@ -3213,25 +3237,65 @@ function generateDashboardHTML() {
         // Activity tab functions
         async function loadActivity() {
             try {
-                var res = await fetch('/api/voice-log?password=' + encodeURIComponent(password));
+                var dateSelect = document.getElementById('activityDate');
+                var selectedDate = dateSelect.value;
+                var url = '/api/voice-log?password=' + encodeURIComponent(password);
+                if (selectedDate) url += '&date=' + selectedDate;
+                
+                var res = await fetch(url);
                 var data = await res.json();
                 if (data.error) return;
+                
+                // Update date dropdown
+                var currentVal = dateSelect.value;
+                dateSelect.innerHTML = '';
+                
+                // Add today option
+                var todayKey = new Date().toISOString().split('T')[0];
+                var todayOpt = document.createElement('option');
+                todayOpt.value = '';
+                todayOpt.textContent = 'Today (' + todayKey + ')';
+                dateSelect.appendChild(todayOpt);
+                
+                // Add available dates
+                if (data.dates) {
+                    data.dates.forEach(function(d) {
+                        if (d !== todayKey) {
+                            var opt = document.createElement('option');
+                            opt.value = d;
+                            var dateObj = new Date(d + 'T12:00:00');
+                            opt.textContent = dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+                            dateSelect.appendChild(opt);
+                        }
+                    });
+                }
+                
+                dateSelect.value = currentVal;
+                
+                // Show selected date
+                document.getElementById('activityDateLabel').textContent = 'Showing: ' + (data.selectedDate || todayKey) + ' (' + (data.voiceLog.length) + ' voice / ' + (data.memberLog.length) + ' member entries)';
                 
                 // Voice log
                 var vContainer = document.getElementById('voiceLogContainer');
                 if (!data.voiceLog || data.voiceLog.length === 0) {
-                    vContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No voice activity recorded yet</p>';
+                    vContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No voice activity for this date</p>';
                 } else {
                     vContainer.innerHTML = data.voiceLog.map(function(entry) {
-                        var color = entry.action === 'joined' ? 'var(--success)' : 'var(--danger)';
-                        var icon = entry.action === 'joined' ? '🟢' : '🔴';
-                        var durText = entry.duration ? ' — Duration: <strong>' + entry.duration + '</strong>' : '';
-                        var time = new Date(entry.timestamp).toLocaleString();
-                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 6px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
-                            icon + ' <strong>' + entry.username + '</strong> (<span style="color: var(--text-muted);">' + entry.userId + '</span>) ' +
-                            '<span style="color: ' + color + ';">' + entry.action + '</span> ' +
-                            '<strong>#' + entry.channelName + '</strong> at ' + entry.timeStr + durText +
-                            '<span style="color: var(--text-muted); float: right; font-size: 11px;">' + time + '</span>' +
+                        var color, icon, actionText;
+                        if (entry.action === 'joined') {
+                            color = 'var(--success)'; icon = '🟢'; actionText = 'joined';
+                        } else if (entry.action === 'switched') {
+                            color = 'var(--warning)'; icon = '🔄'; actionText = 'switched from';
+                        } else {
+                            color = 'var(--danger)'; icon = '🔴'; actionText = 'left';
+                        }
+                        var durText = entry.duration ? ' — <strong>' + entry.duration + '</strong>' : '';
+                        var toText = entry.toChannel ? ' → <strong>#' + entry.toChannel + '</strong>' : '';
+                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 4px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
+                            '<span style="color: var(--text-muted); font-size: 11px; float: right;">' + entry.timeStr + '</span>' +
+                            icon + ' <strong>' + entry.username + '</strong> ' +
+                            '<span style="color: ' + color + ';">' + actionText + '</span> ' +
+                            '<strong>#' + entry.channelName + '</strong>' + toText + durText +
                         '</div>';
                     }).join('');
                 }
@@ -3239,17 +3303,16 @@ function generateDashboardHTML() {
                 // Member log
                 var mContainer = document.getElementById('memberLogContainer');
                 if (!data.memberLog || data.memberLog.length === 0) {
-                    mContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No member activity recorded yet</p>';
+                    mContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">No member activity for this date</p>';
                 } else {
                     mContainer.innerHTML = data.memberLog.map(function(entry) {
                         var color = entry.action === 'joined' ? 'var(--success)' : 'var(--danger)';
                         var icon = entry.action === 'joined' ? '📥' : '📤';
                         var actionText = entry.action === 'joined' ? 'joined the server' : 'left the server';
-                        var time = new Date(entry.timestamp).toLocaleString();
-                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 6px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
-                            icon + ' <strong>' + entry.username + '</strong> (<span style="color: var(--text-muted);">' + entry.userId + '</span>) ' +
+                        return '<div style="background: var(--bg-tertiary); padding: 10px 14px; border-radius: 6px; margin-bottom: 4px; border-left: 3px solid ' + color + '; font-size: 13px;">' +
+                            '<span style="color: var(--text-muted); font-size: 11px; float: right;">' + entry.timeStr + '</span>' +
+                            icon + ' <strong>' + entry.username + '</strong> ' +
                             '<span style="color: ' + color + ';">' + actionText + '</span> at ' + entry.timeStr +
-                            '<span style="color: var(--text-muted); float: right; font-size: 11px;">' + time + '</span>' +
                         '</div>';
                     }).join('');
                 }
