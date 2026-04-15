@@ -2707,7 +2707,7 @@ function generateDashboardHTML() {
             <button class="tab" onclick="showTab('audit', this)">📋 Audit Log</button>
             <button class="tab" onclick="showTab('roles', this)">🔐 Roles</button>
             <button class="tab" onclick="showTab('words', this)">🚫 Banned Words</button>
-            <button class="tab" onclick="showTab('activity', this)">📊 Activity</button>
+            <button class="tab" onclick="showTab('activity', this)">📋 Join/Leave Audits</button>
         </div>
 
         <div id="tab-messages" class="tab-content active">
@@ -2798,12 +2798,12 @@ function generateDashboardHTML() {
 
         <div id="tab-activity" class="tab-content">
             <div class="card">
-                <h2>🎤 Voice Channel Activity</h2>
+                <h2>🎤 Voice Chat Join / Leave Log</h2>
                 <button class="btn btn-secondary mb-2" onclick="loadActivity()">Refresh</button>
                 <div id="voiceLogContainer" style="max-height: 500px; overflow-y: auto;"></div>
             </div>
             <div class="card">
-                <h2>📥 Member Join / Leave Log</h2>
+                <h2>📥 Server Join / Leave Log</h2>
                 <div id="memberLogContainer" style="max-height: 500px; overflow-y: auto;"></div>
             </div>
         </div>
