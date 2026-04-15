@@ -44,18 +44,17 @@ const PATROL_COOLDOWN = 16 * 60 * 60 * 1000; // 16 hours in milliseconds
 // BANNED WORDS AUTO-JAIL SYSTEM
 // ======================
 
-// Offense tracking: userId -> count of offenses
-const offenseTracker = new Map();
+const BANNED_WORDS_FILE = '/data/banned-words.json';
 
-// Banned words list (editable via dashboard)
-let bannedWords = [
-    // Doxxing related
+// Offense tracking: userId -> count of offenses
+let offenseTracker = new Map();
+
+// Default banned words list
+const DEFAULT_BANNED_WORDS = [
     'dox', 'doxx', 'doxxing', 'doxing', 'doxed', 'doxxed', 'doxer', 'doxxer', 'doxxers',
-    // Violence / threats
     'swat', 'swatting', 'swatted',
     'kill your self', 'kill youre self', "kill you're self", 'kill yourself',
     'suicide', 'suicidebait', 'suicide bait',
-    // Racial slurs
     'nigga', 'nigger', 'niggas', 'niggers', "nigger's", "nigga's",
     'spic', 'spick', 'spics',
     'wetback', 'wetbacks',
@@ -81,6 +80,48 @@ let bannedWords = [
     'slant eye', 'slanteye',
     'yellowskin',
 ];
+
+// Banned words list (editable via dashboard, persisted to disk)
+let bannedWords = [...DEFAULT_BANNED_WORDS];
+
+// Load banned words from disk
+function loadBannedWordsFromDisk() {
+    try {
+        if (fs.existsSync(BANNED_WORDS_FILE)) {
+            const raw = fs.readFileSync(BANNED_WORDS_FILE, 'utf-8');
+            const data = JSON.parse(raw);
+            if (data.bannedWords && Array.isArray(data.bannedWords)) {
+                bannedWords = data.bannedWords;
+            }
+            if (data.offenses) {
+                offenseTracker = new Map(Object.entries(data.offenses));
+            }
+            console.log(`✅ Loaded banned words from disk: ${bannedWords.length} words, ${offenseTracker.size} offenders`);
+        }
+    } catch (error) {
+        console.error('❌ Error loading banned words from disk:', error);
+    }
+}
+
+let saveBannedTimer = null;
+function saveBannedWordsToDisk() {
+    if (saveBannedTimer) return;
+    saveBannedTimer = setTimeout(() => {
+        saveBannedTimer = null;
+        try {
+            const data = {
+                bannedWords: bannedWords,
+                offenses: Object.fromEntries(offenseTracker),
+                lastSaved: new Date().toISOString(),
+            };
+            fs.writeFileSync(BANNED_WORDS_FILE, JSON.stringify(data), 'utf-8');
+        } catch (error) {
+            console.error('❌ Error saving banned words to disk:', error);
+        }
+    }, 2000);
+}
+
+loadBannedWordsFromDisk();
 
 // Fun features state
 let triviaEnabled = false;
@@ -510,10 +551,73 @@ client.on('guildMemberAdd', async (member) => {
 // VOICE CHANNEL TRACKING
 // ======================
 
+// Persistent storage path
+const LOGS_FILE = '/data/logs.json';
+
 // Organized by date: 'YYYY-MM-DD' -> [entries]
-const voiceLogs = new Map();
-const memberLogs = new Map();
+let voiceLogs = new Map();
+let memberLogs = new Map();
 const voiceJoinTimes = new Map(); // `${userId}-${channelId}` -> joinTimestamp
+
+// Load logs from disk on startup
+function loadLogsFromDisk() {
+    try {
+        if (fs.existsSync(LOGS_FILE)) {
+            const raw = fs.readFileSync(LOGS_FILE, 'utf-8');
+            const data = JSON.parse(raw);
+            
+            if (data.voiceLogs) {
+                voiceLogs = new Map(Object.entries(data.voiceLogs));
+            }
+            if (data.memberLogs) {
+                memberLogs = new Map(Object.entries(data.memberLogs));
+            }
+            
+            // Prune logs older than 30 days
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - 30);
+            const cutoffKey = getDateKey(cutoff);
+            
+            for (const key of voiceLogs.keys()) {
+                if (key < cutoffKey) voiceLogs.delete(key);
+            }
+            for (const key of memberLogs.keys()) {
+                if (key < cutoffKey) memberLogs.delete(key);
+            }
+            
+            const totalVoice = Array.from(voiceLogs.values()).reduce((sum, arr) => sum + arr.length, 0);
+            const totalMember = Array.from(memberLogs.values()).reduce((sum, arr) => sum + arr.length, 0);
+            console.log(`✅ Loaded logs from disk: ${totalVoice} voice entries, ${totalMember} member entries across ${voiceLogs.size + memberLogs.size} days`);
+        } else {
+            console.log('📝 No existing logs file found, starting fresh');
+        }
+    } catch (error) {
+        console.error('❌ Error loading logs from disk:', error);
+    }
+}
+
+// Save logs to disk
+let saveTimer = null;
+function saveLogsToDisk() {
+    // Debounce: only save once per 5 seconds even if multiple events fire
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        try {
+            const data = {
+                voiceLogs: Object.fromEntries(voiceLogs),
+                memberLogs: Object.fromEntries(memberLogs),
+                lastSaved: new Date().toISOString(),
+            };
+            fs.writeFileSync(LOGS_FILE, JSON.stringify(data), 'utf-8');
+        } catch (error) {
+            console.error('❌ Error saving logs to disk:', error);
+        }
+    }, 5000);
+}
+
+// Load on startup
+loadLogsFromDisk();
 
 function getDateKey(date) {
     return date.toISOString().split('T')[0]; // 'YYYY-MM-DD'
@@ -528,6 +632,7 @@ function addVoiceLog(entry) {
         const oldest = Array.from(voiceLogs.keys()).sort()[0];
         voiceLogs.delete(oldest);
     }
+    saveLogsToDisk();
 }
 
 function addMemberLog(entry) {
@@ -538,6 +643,7 @@ function addMemberLog(entry) {
         const oldest = Array.from(memberLogs.keys()).sort()[0];
         memberLogs.delete(oldest);
     }
+    saveLogsToDisk();
 }
 
 client.on('voiceStateUpdate', (oldState, newState) => {
@@ -920,6 +1026,7 @@ async function handleBannedWord(message, triggeredWord) {
         // Track offenses
         const currentOffenses = (offenseTracker.get(userId) || 0) + 1;
         offenseTracker.set(userId, currentOffenses);
+        saveBannedWordsToDisk();
         
         // Determine jail duration based on offense count
         let jailDuration;
@@ -2478,17 +2585,20 @@ function startKeepAliveServer() {
                             bannedWords.push(word);
                             addAuditLog('Banned Word Added', { tag: 'Web Dashboard', id: 'web' }, `Added: "${word}"`, 'info');
                         }
+                        saveBannedWordsToDisk();
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: true, words: bannedWords }));
                     } else if (data.action === 'remove' && data.word) {
                         const word = data.word.toLowerCase().trim();
                         bannedWords = bannedWords.filter(w => w.toLowerCase() !== word);
                         addAuditLog('Banned Word Removed', { tag: 'Web Dashboard', id: 'web' }, `Removed: "${word}"`, 'info');
+                        saveBannedWordsToDisk();
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: true, words: bannedWords }));
                     } else if (data.action === 'reset-offenses' && data.userId) {
                         offenseTracker.delete(data.userId);
                         addAuditLog('Offenses Reset', { tag: 'Web Dashboard', id: 'web' }, `Reset offenses for ${data.userId}`, 'info');
+                        saveBannedWordsToDisk();
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: true }));
                     } else {
