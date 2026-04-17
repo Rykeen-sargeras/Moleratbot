@@ -461,6 +461,19 @@ client.on('ready', async () => {
                         .setDescription('The user to jail')
                         .setRequired(true))
                 .addStringOption(option =>
+                    option.setName('duration')
+                        .setDescription('How long to jail (default: permanent)')
+                        .setRequired(false)
+                        .addChoices(
+                            { name: '5 minutes', value: '5m' },
+                            { name: '30 minutes', value: '30m' },
+                            { name: '1 hour', value: '1h' },
+                            { name: '6 hours', value: '6h' },
+                            { name: '12 hours', value: '12h' },
+                            { name: '24 hours', value: '24h' },
+                            { name: 'Permanent', value: 'perm' },
+                        ))
+                .addStringOption(option =>
                     option.setName('reason')
                         .setDescription('Reason for jailing')
                         .setRequired(false))
@@ -472,6 +485,10 @@ client.on('ready', async () => {
                     option.setName('user')
                         .setDescription('The user to unjail')
                         .setRequired(true))
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('close')
+                .setDescription('Close a jail channel without unjailing (for bans)')
                 .toJSON()
         ];
         
@@ -509,15 +526,92 @@ client.on('ready', async () => {
     startKeepAliveServer();
 });
 
-// Alt account detection on member join
-client.on('guildMemberAdd', async (member) => {
-    if (!CONFIG.ALT_DETECTION_ENABLED) return;
-    
+// Name history tracking (persisted to disk)
+const NAME_HISTORY_FILE = '/data/name-history.json';
+let nameHistory = new Map(); // oduserId -> { names: [{ name, timestamp }] }
+
+function loadNameHistory() {
     try {
+        if (fs.existsSync(NAME_HISTORY_FILE)) {
+            const raw = fs.readFileSync(NAME_HISTORY_FILE, 'utf-8');
+            const data = JSON.parse(raw);
+            nameHistory = new Map(Object.entries(data));
+            console.log(`✅ Loaded name history: ${nameHistory.size} users tracked`);
+        }
+    } catch (e) {
+        console.error('❌ Error loading name history:', e);
+    }
+}
+
+function saveNameHistory() {
+    try {
+        fs.writeFileSync(NAME_HISTORY_FILE, JSON.stringify(Object.fromEntries(nameHistory)), 'utf-8');
+    } catch (e) {
+        console.error('❌ Error saving name history:', e);
+    }
+}
+
+loadNameHistory();
+
+// Alt account detection + name change detection on member join
+client.on('guildMemberAdd', async (member) => {
+    try {
+        const userId = member.user.id;
+        const currentName = member.user.tag;
+        
+        // Check name history for this user
+        const history = nameHistory.get(userId);
+        
+        if (history) {
+            // User has joined before - check if name changed
+            const previousNames = history.names.map(n => n.name);
+            const lastName = previousNames[previousNames.length - 1];
+            
+            if (lastName && lastName !== currentName) {
+                // Name changed! Alert mod channel
+                if (CONFIG.MOD_CHANNEL_ID) {
+                    try {
+                        const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
+                        const embed = new Discord.EmbedBuilder()
+                            .setColor('#FF9900')
+                            .setTitle('🔄 Returning Member — Name Changed')
+                            .setThumbnail(member.user.displayAvatarURL())
+                            .addFields(
+                                { name: 'Current Name', value: currentName, inline: true },
+                                { name: 'Previous Name', value: lastName, inline: true },
+                                { name: 'User ID', value: userId, inline: true },
+                                { name: 'All Known Names', value: previousNames.join(', '), inline: false },
+                                { name: 'Times Joined', value: `${history.names.length + 1}`, inline: true },
+                                { name: 'Status', value: '🔍 Review recommended', inline: true }
+                            )
+                            .setFooter({ text: 'Name Change Detection' })
+                            .setTimestamp();
+                        
+                        await modChannel.send({ embeds: [embed] });
+                        addAuditLog('Name Change Detected', member.user, `Was: ${lastName} → Now: ${currentName}`, 'warning');
+                    } catch (e) {
+                        console.error('❌ Error sending name change alert:', e);
+                    }
+                }
+            }
+            
+            // Add current name to history
+            history.names.push({ name: currentName, timestamp: new Date().toISOString() });
+        } else {
+            // First time seeing this user
+            nameHistory.set(userId, {
+                names: [{ name: currentName, timestamp: new Date().toISOString() }]
+            });
+        }
+        
+        saveNameHistory();
+        
+        // Alt detection (existing code)
+        if (!CONFIG.ALT_DETECTION_ENABLED) return;
+        
         const accountAge = Date.now() - member.user.createdTimestamp;
         const accountAgeDays = Math.floor(accountAge / (1000 * 60 * 60 * 24));
         
-        // Check if account is suspiciously new
         if (accountAgeDays < CONFIG.ALT_ACCOUNT_AGE_DAYS) {
             const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
             if (modChannel) {
@@ -543,7 +637,7 @@ client.on('guildMemberAdd', async (member) => {
         
         addAuditLog('Member Joined', member.user, `Account age: ${accountAgeDays} days`, 'info');
     } catch (error) {
-        console.error('Error in alt detection:', error);
+        console.error('Error in member join handler:', error);
     }
 });
 
@@ -1327,6 +1421,8 @@ client.on('interactionCreate', async (interaction) => {
             await handleJailCommand(interaction);
         } else if (interaction.commandName === 'unjail') {
             await handleUnjailCommand(interaction);
+        } else if (interaction.commandName === 'close') {
+            await handleCloseCommand(interaction);
         }
     } catch (error) {
         console.error('❌ Error in slash command:', error);
@@ -1441,10 +1537,23 @@ async function handleJailCommand(interaction) {
     
     const targetUser = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason provided';
+    const durationChoice = interaction.options.getString('duration') || 'perm';
     const guild = interaction.guild;
     const targetMember = await guild.members.fetch(targetUser.id);
     
-    console.log(`🔒 /jail used by ${interaction.user.tag} on ${targetUser.tag}`);
+    // Parse duration
+    const DURATION_MAP = {
+        '5m': { ms: 5 * 60 * 1000, label: '5 minutes' },
+        '30m': { ms: 30 * 60 * 1000, label: '30 minutes' },
+        '1h': { ms: 60 * 60 * 1000, label: '1 hour' },
+        '6h': { ms: 6 * 60 * 60 * 1000, label: '6 hours' },
+        '12h': { ms: 12 * 60 * 60 * 1000, label: '12 hours' },
+        '24h': { ms: 24 * 60 * 60 * 1000, label: '24 hours' },
+        'perm': { ms: null, label: 'Permanent' },
+    };
+    const duration = DURATION_MAP[durationChoice] || DURATION_MAP['perm'];
+    
+    console.log(`🔒 /jail used by ${interaction.user.tag} on ${targetUser.tag} - Duration: ${duration.label}`);
     
     // Assign jail role
     try {
@@ -1505,16 +1614,82 @@ async function handleJailCommand(interaction) {
                 { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: true },
                 { name: 'Jailed By', value: `${interaction.user.tag}`, inline: true },
                 { name: 'Reason', value: reason },
-                { name: 'Status', value: '🔒 Jailed — use /unjail to release', inline: true }
+                { name: 'Duration', value: duration.label, inline: true },
+                { name: 'Status', value: duration.ms ? '⏱️ Timed jail' : '🔒 Permanent — use /unjail to release', inline: true }
             )
-            .setFooter({ text: 'Staff can use /unjail to restore access' })
+            .setFooter({ text: duration.ms ? 'Will auto-unjail when time expires' : 'Staff can use /unjail to restore access' })
             .setTimestamp();
         
         await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${targetUser.id}>`, embeds: [embed] });
         
         console.log(`✅ Jail channel created: #${jailChannel.name}`);
         
-        await interaction.editReply({ content: `✅ ${targetUser.tag} has been jailed. Jail channel: <#${jailChannel.id}>` });
+        await interaction.editReply({ content: `✅ ${targetUser.tag} has been jailed for ${duration.label}. Jail channel: <#${jailChannel.id}>` });
+        
+        // Auto-unjail timer for timed jails
+        if (duration.ms) {
+            setTimeout(async () => {
+                try {
+                    // Remove jail role
+                    try {
+                        const member = await guild.members.fetch(targetUser.id);
+                        await member.roles.remove(JAIL_ROLE_ID);
+                    } catch (e) {}
+                    
+                    // Restore categories
+                    for (const catId of JAIL_CATEGORY_IDS) {
+                        try {
+                            const cat = await guild.channels.fetch(catId);
+                            if (!cat) continue;
+                            await cat.permissionOverwrites.delete(targetUser.id).catch(() => {});
+                            const kids = guild.channels.cache.filter(ch => ch.parentId === catId);
+                            for (const [, kid] of kids) {
+                                await kid.permissionOverwrites.delete(targetUser.id).catch(() => {});
+                            }
+                        } catch (e) {}
+                    }
+                    
+                    // Archive jail channel
+                    const jChanId = jailChannels.get(targetUser.id);
+                    if (jChanId) {
+                        try {
+                            const jChan = await guild.channels.fetch(jChanId);
+                            if (jChan) {
+                                const msgs = await jChan.messages.fetch({ limit: 100 });
+                                const transcript = msgs.reverse().map(m => `[${m.createdAt.toISOString()}] ${m.author.tag}: ${m.content}`).join('\n');
+                                
+                                const logCh = await client.channels.fetch(JAIL_LOG_CHANNEL_ID);
+                                if (logCh) {
+                                    const buf = Buffer.from(transcript, 'utf-8');
+                                    const att = new Discord.AttachmentBuilder(buf, { name: `${jChan.name}-transcript.txt` });
+                                    const logEmbed = new Discord.EmbedBuilder()
+                                        .setColor('#00FF00')
+                                        .setTitle(`🔓 Auto-Unjailed: ${targetUser.tag}`)
+                                        .addFields(
+                                            { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: true },
+                                            { name: 'Duration', value: duration.label, inline: true },
+                                        )
+                                        .setFooter({ text: 'Transcript attached' })
+                                        .setTimestamp();
+                                    await logCh.send({ embeds: [logEmbed], files: [att] });
+                                }
+                                
+                                await jChan.send('🔓 Jail time expired. This channel will be deleted in 5 seconds...');
+                                setTimeout(() => jChan.delete().catch(() => {}), 5000);
+                            }
+                        } catch (e) {
+                            console.error('❌ Error archiving auto-unjail channel:', e);
+                        }
+                        jailChannels.delete(targetUser.id);
+                    }
+                    
+                    console.log(`✅ Auto-unjailed ${targetUser.tag} after ${duration.label}`);
+                    addAuditLog('Auto-Unjailed', { tag: targetUser.tag, id: targetUser.id }, `Auto-unjailed after ${duration.label}`, 'success');
+                } catch (err) {
+                    console.error('❌ Error in auto-unjail timer:', err);
+                }
+            }, duration.ms);
+        }
         
     } catch (error) {
         console.error('❌ Error creating jail channel:', error);
@@ -1635,6 +1810,69 @@ async function handleUnjailCommand(interaction) {
     await interaction.editReply({ content: `✅ ${targetUser.tag} has been unjailed. Transcript saved to <#${JAIL_LOG_CHANNEL_ID}>.` });
     
     addAuditLog('User Unjailed', interaction.user, `Unjailed ${targetUser.tag}`, 'success');
+}
+
+// ======================
+// /CLOSE HANDLER (close jail channel without unjailing - for bans)
+// ======================
+
+async function handleCloseCommand(interaction) {
+    const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
+    const isStaff = interaction.member.roles.cache.some(role => 
+        CONFIG.STAFF_ROLE_IDS.includes(role.id) || HARDCODED_STAFF_ROLES.includes(role.id)
+    ) || interaction.member.permissions.has(Discord.PermissionFlagsBits.Administrator);
+    
+    if (!isStaff) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
+    }
+    
+    const channel = interaction.channel;
+    
+    // Check if this is a jail or report channel
+    if (!channel.name.startsWith('jail-') && !channel.name.startsWith('report-')) {
+        await interaction.reply({ content: '❌ This command only works in jail or report channels.', ephemeral: true });
+        return;
+    }
+    
+    await interaction.reply({ content: '🗃️ Archiving and closing this channel...' });
+    
+    try {
+        // Create transcript
+        const messages = await channel.messages.fetch({ limit: 100 });
+        const transcript = messages.reverse().map(msg => 
+            `[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`
+        ).join('\n');
+        
+        // Send transcript to log channel
+        const logChannel = await client.channels.fetch(JAIL_LOG_CHANNEL_ID);
+        if (logChannel) {
+            const transcriptBuffer = Buffer.from(transcript, 'utf-8');
+            const attachment = new Discord.AttachmentBuilder(transcriptBuffer, { name: `${channel.name}-transcript.txt` });
+            
+            const logEmbed = new Discord.EmbedBuilder()
+                .setColor('#FFA500')
+                .setTitle(`🗃️ Channel Closed: ${channel.name}`)
+                .addFields(
+                    { name: 'Closed By', value: `${interaction.user.tag}`, inline: true },
+                    { name: 'Type', value: channel.name.startsWith('jail-') ? 'Jail Channel' : 'Report Channel', inline: true },
+                )
+                .setFooter({ text: 'Transcript attached below' })
+                .setTimestamp();
+            
+            await logChannel.send({ embeds: [logEmbed], files: [attachment] });
+        }
+        
+        addAuditLog('Channel Closed', interaction.user, `Closed ${channel.name}`, 'info');
+        
+        await channel.send('🗃️ This channel will be deleted in 5 seconds...');
+        setTimeout(async () => {
+            await channel.delete().catch(err => console.error('Error deleting channel:', err));
+        }, 5000);
+        
+    } catch (error) {
+        console.error('❌ Error closing channel:', error);
+    }
 }
 
 // ======================
