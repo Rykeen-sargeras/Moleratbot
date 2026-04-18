@@ -34,6 +34,7 @@ const CONFIG = {
     ALT_DETECTION_ENABLED: process.env.ALT_DETECTION_ENABLED !== 'false', // Default enabled
     ALT_ACCOUNT_AGE_DAYS: parseInt(process.env.ALT_ACCOUNT_AGE_DAYS || '7'), // Flag accounts newer than 7 days
     PATROL_CHANNEL_ID: '1486376733413347358', // Self-promo channel with 16hr cooldown
+    LOCATIONIQ_API_KEY: process.env.LOCATIONIQ_API_KEY || '',
 };
 
 // Patrol channel tracking
@@ -949,13 +950,9 @@ client.on('messageCreate', async (message) => {
     // Check if user is staff
     const isStaff = message.member.roles.cache.some(role => CONFIG.STAFF_ROLE_IDS.includes(role.id));
     
-    // Address detection for non-staff only
-    if (!isStaff) {
-        const addressDetected = detectAddress(message.content);
-        if (addressDetected) {
-            await handleAddressDetection(message, addressDetected);
-            return;
-        }
+    // Address detection for non-staff only (API-based)
+    if (!isStaff && !isStaffForFilter) {
+        checkAddressAPI(message);
     }
     
     // Commands (work in server channels)
@@ -1281,122 +1278,214 @@ async function handleBannedWord(message, triggeredWord) {
     }
 }
 
-// Address detection patterns - VERY strict to avoid false positives
-const ADDRESS_PATTERNS = [
-    // Full US street address (number + street name + street type + optional city/state/zip)
-    /\b\d{1,5}\s+[\w\s]{3,30}(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl)\b[\s,]+[\w\s]+,?\s+(?:[A-Z]{2}|\w{4,})\s*\d{5}/i,
-    
-    // Address with apartment/unit AND street name
-    /\b(?:apartment|apt|unit|suite|ste)\s*#?\d+[,\s]+\d{1,5}\s+[\w\s]{3,}(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr)\b/i,
-    
-    // UK full address with postcode
-    /\b\d{1,5}\s+[\w\s]{3,30}(?:street|road|lane|avenue|drive|way|close|court)\b.*\b[A-Z]{1,2}\d{1,2}[A-Z]?\s+\d[A-Z]{2}\b/i,
-    
-    // Australian address (street + suburb + state + postcode)
-    /\b\d{1,5}\s+[\w\s]{3,30}(?:street|road|avenue|drive|st|rd|ave|dr)\b[\s,]+[\w\s]{3,20}[\s,]+(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\s+\d{4}\b/i,
-];
+// ======================
+// ADDRESS DETECTION (LocationIQ API)
+// ======================
 
-function detectAddress(text) {
-    // Ignore if message is too short (likely not a real address)
-    if (text.length < 20) return null;
+// Quick pre-filter: does the message look like it might contain an address?
+function mightContainAddress(text) {
+    if (text.length < 15) return false;
     
-    // Ignore if message contains whitelisted phrases (context that indicates not a real address)
-    const whitelistPhrases = [
-        'example', 'test', 'fake', 'sample', 'lorem ipsum',
-        'http', 'https', 'www.', '.com', '.net', '.org',
-        'discord.gg', 'youtube.com', 'twitter.com',
-        'price', 'cost', '$', '€', '£', 'buy', 'sell',
-        'code', 'error', 'line', 'function',
-        'minute', 'hour', 'second', 'day', 'week', 'month', 'year',
-        'until', 'in', 'ago', 'time', 'timer', 'clock',
-        'stream', 'video', 'live', 'watch', 'tonight', 'today', 'tomorrow'
-    ];
+    // Must have a street number
+    if (!/\d{1,5}/.test(text)) return false;
     
-    const lowerText = text.toLowerCase();
-    for (const phrase of whitelistPhrases) {
-        if (lowerText.includes(phrase)) return null;
-    }
+    // Must have a street-type word
+    const streetWords = /\b(street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter)\b/i;
+    if (!streetWords.test(text)) return false;
     
-    // Check patterns
-    for (const pattern of ADDRESS_PATTERNS) {
-        const match = text.match(pattern);
-        if (match) {
-            // Extra validation: make sure it looks like a real address
-            const matchText = match[0];
-            
-            // Ignore if it's just numbers with no context
-            if (/^\d+$/.test(matchText.trim())) return null;
-            
-            // Must contain multiple address components (not just street name)
-            const hasNumber = /\d{1,5}/.test(matchText);
-            const hasStreet = /(?:street|avenue|road|boulevard|lane|drive|st|ave|rd|blvd|ln|dr)/.test(matchText.toLowerCase());
-            const hasCityOrZip = /(?:[A-Z]{2}\s+\d{5}|,\s*[A-Z][a-z]+)/.test(matchText);
-            
-            // Require all three components for a valid address
-            if (!hasNumber || !hasStreet || !hasCityOrZip) return null;
-            
-            return matchText;
-        }
-    }
-    return null;
+    // Skip URLs, code, prices
+    if (/https?:\/\/|discord\.gg|```|\$\d|function\s|var\s|const\s|let\s/.test(text)) return false;
+    
+    return true;
 }
 
-async function handleAddressDetection(message, address) {
-    try {
-        console.log(`🚨 Address detected from ${message.author.tag} in #${message.channel.name}`);
-        console.log(`MOD_CHANNEL_ID configured: ${CONFIG.MOD_CHANNEL_ID || 'NOT SET'}`);
-        
-        // Delete the message
-        await message.delete();
-        console.log('✅ Message deleted');
-        
-        // Timeout user for 12 hours
-        await message.member.timeout(12 * 60 * 60 * 1000, 'Posted address in chat');
-        console.log('✅ User timed out');
-        
-        // Add audit log entry
-        addAuditLog(
-            'Address Detected',
-            message.author,
-            `Detected in #${message.channel.name}: ${address.substring(0, 50)}... - User timed out 12hrs`,
-            'warning'
-        );
-        
-        // Alert mod channel
-        if (!CONFIG.MOD_CHANNEL_ID) {
-            console.error('❌ MOD_CHANNEL_ID not configured! Cannot send alert.');
-            return;
+// Extract potential address candidates from text
+function extractAddressCandidates(text) {
+    const candidates = [];
+    
+    // Match patterns like "123 Main Street" or "456 Oak Ave, City, ST 12345"
+    const addressRegex = /\b(\d{1,5}\s+[\w\s]{2,30}(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter)\b[^.!?\n]*)/gi;
+    
+    let match;
+    while ((match = addressRegex.exec(text)) !== null) {
+        const candidate = match[1].trim().substring(0, 150);
+        if (candidate.length >= 10) {
+            candidates.push(candidate);
         }
+    }
+    
+    return candidates;
+}
+
+// Check with LocationIQ API if text is a real address
+async function verifyAddressWithAPI(text) {
+    if (!CONFIG.LOCATIONIQ_API_KEY) {
+        console.warn('⚠️ LOCATIONIQ_API_KEY not configured - skipping address verification');
+        return null;
+    }
+    
+    try {
+        const https = require('https');
+        const encodedText = encodeURIComponent(text);
+        const url = `https://us1.locationiq.com/v1/search?key=${CONFIG.LOCATIONIQ_API_KEY}&q=${encodedText}&format=json&limit=1&addressdetails=1`;
         
+        return new Promise((resolve, reject) => {
+            const req = https.get(url, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        if (res.statusCode === 200) {
+                            const results = JSON.parse(data);
+                            if (results && results.length > 0) {
+                                const result = results[0];
+                                const addr = result.address || {};
+                                
+                                // Only flag as real address if it has a house number + road
+                                // This avoids flagging city names, landmarks, etc.
+                                if (addr.house_number && addr.road) {
+                                    return resolve({
+                                        verified: true,
+                                        displayName: result.display_name,
+                                        type: result.type,
+                                        confidence: parseFloat(result.importance || 0),
+                                        hasHouseNumber: !!addr.house_number,
+                                        hasRoad: !!addr.road,
+                                        hasCity: !!(addr.city || addr.town || addr.village),
+                                        hasState: !!addr.state,
+                                        hasPostcode: !!addr.postcode,
+                                    });
+                                }
+                            }
+                            resolve(null);
+                        } else if (res.statusCode === 404) {
+                            resolve(null); // Not found = not an address
+                        } else {
+                            console.warn(`⚠️ LocationIQ returned status ${res.statusCode}`);
+                            resolve(null);
+                        }
+                    } catch (e) {
+                        resolve(null);
+                    }
+                });
+            });
+            
+            req.on('error', (e) => {
+                console.error('❌ LocationIQ API error:', e.message);
+                resolve(null);
+            });
+            
+            req.setTimeout(5000, () => {
+                req.destroy();
+                resolve(null);
+            });
+        });
+    } catch (error) {
+        console.error('❌ Error calling LocationIQ API:', error);
+        return null;
+    }
+}
+
+// Main async address check function
+async function checkAddressAPI(message) {
+    try {
+        // Quick pre-filter
+        if (!mightContainAddress(message.content)) return;
+        
+        // Extract candidates
+        const candidates = extractAddressCandidates(message.content);
+        if (candidates.length === 0) return;
+        
+        console.log(`🔍 Checking ${candidates.length} potential address(es) from ${message.author.tag}`);
+        
+        // Check each candidate with API
+        for (const candidate of candidates) {
+            const result = await verifyAddressWithAPI(candidate);
+            
+            if (result && result.verified) {
+                console.log(`🚨 VERIFIED ADDRESS from ${message.author.tag}: ${result.displayName}`);
+                await handleAddressDetection(message, candidate, result);
+                return; // Only need to catch one
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error in address check:', error);
+    }
+}
+
+async function handleAddressDetection(message, addressText, apiResult) {
+    try {
+        const userId = message.author.id;
+        const guild = message.guild;
+        
+        // Delete the message immediately
+        await message.delete();
+        console.log('✅ Address message deleted');
+        
+        // Jail the user
         try {
-            const modChannel = await client.channels.fetch(CONFIG.MOD_CHANNEL_ID);
-            console.log(`✅ Mod channel fetched: ${modChannel.name}`);
+            const member = await guild.members.fetch(userId);
+            await member.roles.add(JAIL_ROLE_ID);
+            
+            // Deny view on categories
+            for (const categoryId of JAIL_CATEGORY_IDS) {
+                try {
+                    const category = await guild.channels.fetch(categoryId);
+                    if (!category) continue;
+                    await category.permissionOverwrites.edit(userId, {
+                        ViewChannel: false, SendMessages: false, Connect: false,
+                    });
+                    const children = guild.channels.cache.filter(ch => ch.parentId === categoryId);
+                    for (const [, child] of children) {
+                        await child.permissionOverwrites.edit(userId, {
+                            ViewChannel: false, SendMessages: false, Connect: false,
+                        });
+                    }
+                } catch (e) {}
+            }
+            
+            // Create jail channel
+            const ticketNumber = Math.floor(Math.random() * 9999);
+            const channelName = `jail-${message.author.username.substring(0, 15)}-${ticketNumber}`;
+            
+            const jailChannel = await guild.channels.create({
+                name: channelName,
+                type: Discord.ChannelType.GuildText,
+                parent: JAIL_CATEGORY_ID,
+                permissionOverwrites: [
+                    { id: guild.id, deny: [Discord.PermissionFlagsBits.ViewChannel] },
+                    { id: userId, allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+                    { id: '1475476293058301952', allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+                    { id: '1475844551737475257', allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+                ],
+            });
+            
+            jailChannels.set(userId, jailChannel.id);
             
             const embed = new Discord.EmbedBuilder()
                 .setColor('#FF0000')
-                .setTitle('🚨 Address Detected and Removed')
+                .setTitle('🚨 Address Posted — User Jailed')
+                .setThumbnail(message.author.displayAvatarURL())
                 .addFields(
-                    { name: 'User', value: `${message.author.tag} (${message.author.id})` },
-                    { name: 'Channel', value: `<#${message.channelId}>` },
-                    { name: 'Detected Address', value: `||${address}||` },
-                    { name: 'Action Taken', value: 'Message deleted, user timed out for 12 hours' }
+                    { name: 'User', value: `${message.author.tag} (${userId})`, inline: true },
+                    { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
+                    { name: 'Verified Address', value: `||${apiResult.displayName}||` },
+                    { name: 'Original Text', value: `||${addressText.substring(0, 200)}||` },
+                    { name: 'Status', value: '🔒 Permanently jailed — use /unjail to release', inline: true }
                 )
+                .setFooter({ text: 'Address verified via LocationIQ API' })
                 .setTimestamp();
             
-            await modChannel.send({ embeds: [embed] });
-            console.log('✅ Alert sent to mod channel');
-        } catch (modError) {
-            console.error('❌ Error sending to mod channel:', modError.message);
-            console.error('Check that MOD_CHANNEL_ID is correct and bot has permissions');
+            await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
+            
+            console.log(`✅ User ${message.author.tag} jailed for posting address`);
+            
+        } catch (jailError) {
+            console.error('❌ Error jailing address poster:', jailError);
         }
         
-        // DM user
-        try {
-            await message.author.send('⚠️ Your message was removed for containing what appears to be a physical address. For your safety, please do not share personal information in public channels. You have been timed out for 12 hours.');
-            console.log('✅ DM sent to user');
-        } catch (e) {
-            console.log('⚠️ Could not DM user about address detection');
-        }
+        addAuditLog('Address Detected', message.author, `Verified address: ${apiResult.displayName.substring(0, 80)} - User jailed`, 'warning');
+        
     } catch (error) {
         console.error('❌ Error handling address detection:', error);
     }
