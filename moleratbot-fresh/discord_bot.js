@@ -1279,133 +1279,140 @@ async function handleBannedWord(message, triggeredWord) {
 }
 
 // ======================
-// ADDRESS DETECTION (LocationIQ API)
+// ADDRESS DETECTION (Positionstack API)
 // ======================
 
-// Quick pre-filter: does the message look like it might contain an address?
+const http_address = require('http'); // Positionstack free tier uses HTTP
+
+const POSITIONSTACK_KEY = '3634f9a1fbf5195caecab5352e55d6f9';
+
+// Pre-filter: could this message contain an address?
 function mightContainAddress(text) {
-    if (text.length < 15) return false;
+    if (text.length < 8) return false;
     
-    // Must have a street number
-    if (!/\d{1,5}/.test(text)) return false;
+    // Must contain a number
+    if (!/\d/.test(text)) return false;
     
-    // Must have a street-type word
-    const streetWords = /\b(street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter)\b/i;
-    if (!streetWords.test(text)) return false;
+    // Skip URLs, code blocks, bot commands
+    if (/https?:\/\/|discord\.gg|```|!config|!help|!trivia|!birthday/.test(text)) return false;
     
-    // Skip URLs, code, prices
-    if (/https?:\/\/|discord\.gg|```|\$\d|function\s|var\s|const\s|let\s/.test(text)) return false;
+    // Look for ANY of these address indicators
+    const hasStreetWord = /\b(street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter|pike|crossing|loop)\b/i.test(text);
+    const hasZip = /\b\d{5}(-\d{4})?\b/.test(text);
+    const hasState = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/.test(text);
+    const hasCommaCity = /,\s*[A-Z][a-z]+/.test(text); // "City, State" pattern
+    const hasNumberStreet = /\d{1,5}\s+\w+/.test(text); // "123 Something"
     
-    return true;
+    // Need number + at least one address indicator
+    if (hasStreetWord) return true;
+    if (hasZip && hasNumberStreet) return true;
+    if (hasState && hasCommaCity && hasNumberStreet) return true;
+    if (hasCommaCity && hasNumberStreet && hasZip) return true;
+    
+    return false;
 }
 
-// Extract potential address candidates from text
+// Extract potential address chunks from text
 function extractAddressCandidates(text) {
     const candidates = [];
     
-    // Match patterns like "123 Main Street" or "456 Oak Ave, City, ST 12345"
-    const addressRegex = /\b(\d{1,5}\s+[\w\s]{2,30}(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter)\b[^.!?\n]*)/gi;
+    // Try the full message (cleaned up)
+    const cleaned = text.replace(/\n/g, ', ').trim();
+    if (cleaned.length >= 8 && cleaned.length <= 200) {
+        candidates.push(cleaned);
+    }
     
-    let match;
-    while ((match = addressRegex.exec(text)) !== null) {
-        const candidate = match[1].trim().substring(0, 150);
-        if (candidate.length >= 10) {
-            candidates.push(candidate);
+    // Extract segments starting with a number followed by words
+    const segments = text.match(/\d{1,5}\s+[\w\s,.']+/g);
+    if (segments) {
+        for (const seg of segments) {
+            const trimmed = seg.trim().substring(0, 150);
+            if (trimmed.length >= 8) candidates.push(trimmed);
         }
     }
     
-    return candidates;
+    // Try each line separately
+    const lines = text.split('\n').filter(l => l.trim().length >= 8 && /\d/.test(l));
+    candidates.push(...lines.map(l => l.trim()));
+    
+    return [...new Set(candidates)].slice(0, 5); // Max 5 candidates
 }
 
-// Check with LocationIQ API if text is a real address
-async function verifyAddressWithAPI(text) {
-    if (!CONFIG.LOCATIONIQ_API_KEY) {
-        console.warn('⚠️ LOCATIONIQ_API_KEY not configured - skipping address verification');
-        return null;
-    }
-    
-    try {
-        const https = require('https');
-        const encodedText = encodeURIComponent(text);
-        const url = `https://us1.locationiq.com/v1/search?key=${CONFIG.LOCATIONIQ_API_KEY}&q=${encodedText}&format=json&limit=1&addressdetails=1`;
-        
-        return new Promise((resolve, reject) => {
-            const req = https.get(url, (res) => {
+// Verify with Positionstack API
+function verifyAddressWithAPI(text) {
+    return new Promise((resolve) => {
+        try {
+            const encoded = encodeURIComponent(text);
+            const url = `http://api.positionstack.com/v1/forward?access_key=${POSITIONSTACK_KEY}&query=${encoded}&limit=1`;
+            
+            http_address.get(url, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
                     try {
-                        if (res.statusCode === 200) {
-                            const results = JSON.parse(data);
-                            if (results && results.length > 0) {
-                                const result = results[0];
-                                const addr = result.address || {};
-                                
-                                // Only flag as real address if it has a house number + road
-                                // This avoids flagging city names, landmarks, etc.
-                                if (addr.house_number && addr.road) {
-                                    return resolve({
-                                        verified: true,
-                                        displayName: result.display_name,
-                                        type: result.type,
-                                        confidence: parseFloat(result.importance || 0),
-                                        hasHouseNumber: !!addr.house_number,
-                                        hasRoad: !!addr.road,
-                                        hasCity: !!(addr.city || addr.town || addr.village),
-                                        hasState: !!addr.state,
-                                        hasPostcode: !!addr.postcode,
-                                    });
-                                }
+                        const result = JSON.parse(data);
+                        
+                        if (result.data && result.data.length > 0) {
+                            const match = result.data[0];
+                            
+                            // Only flag if it's a street-level address (has a street name)
+                            // Confidence threshold: 0.8+ means very likely a real address
+                            const hasStreet = match.street || match.name;
+                            const hasNumber = match.number;
+                            const confidence = match.confidence || 0;
+                            
+                            console.log(`🔍 Positionstack result: ${match.label} | confidence: ${confidence} | street: ${match.street} | number: ${match.number} | type: ${match.type}`);
+                            
+                            if (hasStreet && confidence >= 0.6) {
+                                resolve({
+                                    verified: true,
+                                    displayName: match.label || `${match.number || ''} ${match.street || ''}, ${match.locality || ''}, ${match.region || ''}`,
+                                    type: match.type,
+                                    confidence: confidence,
+                                    street: match.street,
+                                    number: match.number,
+                                    city: match.locality || match.county,
+                                    state: match.region,
+                                    zip: match.postal_code,
+                                    country: match.country,
+                                });
+                                return;
                             }
-                            resolve(null);
-                        } else if (res.statusCode === 404) {
-                            resolve(null); // Not found = not an address
-                        } else {
-                            console.warn(`⚠️ LocationIQ returned status ${res.statusCode}`);
-                            resolve(null);
                         }
+                        resolve(null);
                     } catch (e) {
+                        console.error('❌ Positionstack parse error:', e.message);
                         resolve(null);
                     }
                 });
-            });
-            
-            req.on('error', (e) => {
-                console.error('❌ LocationIQ API error:', e.message);
+            }).on('error', (e) => {
+                console.error('❌ Positionstack API error:', e.message);
                 resolve(null);
             });
-            
-            req.setTimeout(5000, () => {
-                req.destroy();
-                resolve(null);
-            });
-        });
-    } catch (error) {
-        console.error('❌ Error calling LocationIQ API:', error);
-        return null;
-    }
+        } catch (error) {
+            console.error('❌ Error calling Positionstack:', error);
+            resolve(null);
+        }
+    });
 }
 
-// Main async address check function
+// Main address check function
 async function checkAddressAPI(message) {
     try {
-        // Quick pre-filter
         if (!mightContainAddress(message.content)) return;
         
-        // Extract candidates
         const candidates = extractAddressCandidates(message.content);
         if (candidates.length === 0) return;
         
-        console.log(`🔍 Checking ${candidates.length} potential address(es) from ${message.author.tag}`);
+        console.log(`🔍 Checking ${candidates.length} potential address(es) from ${message.author.tag}: "${message.content.substring(0, 60)}"`);
         
-        // Check each candidate with API
         for (const candidate of candidates) {
             const result = await verifyAddressWithAPI(candidate);
             
             if (result && result.verified) {
                 console.log(`🚨 VERIFIED ADDRESS from ${message.author.tag}: ${result.displayName}`);
                 await handleAddressDetection(message, candidate, result);
-                return; // Only need to catch one
+                return;
             }
         }
     } catch (error) {
@@ -1446,7 +1453,7 @@ async function handleAddressDetection(message, addressText, apiResult) {
             
             // Create jail channel
             const ticketNumber = Math.floor(Math.random() * 9999);
-            const channelName = `jail-${message.author.username.substring(0, 15)}-${ticketNumber}`;
+            const channelName = `jail-doxx-${message.author.username.substring(0, 10)}-${ticketNumber}`;
             
             const jailChannel = await guild.channels.create({
                 name: channelName,
@@ -1470,10 +1477,11 @@ async function handleAddressDetection(message, addressText, apiResult) {
                     { name: 'User', value: `${message.author.tag} (${userId})`, inline: true },
                     { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
                     { name: 'Verified Address', value: `||${apiResult.displayName}||` },
+                    { name: 'Confidence', value: `${Math.round(apiResult.confidence * 100)}%`, inline: true },
                     { name: 'Original Text', value: `||${addressText.substring(0, 200)}||` },
                     { name: 'Status', value: '🔒 Permanently jailed — use /unjail to release', inline: true }
                 )
-                .setFooter({ text: 'Address verified via LocationIQ API' })
+                .setFooter({ text: 'Address verified via Positionstack API' })
                 .setTimestamp();
             
             await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
@@ -1484,7 +1492,7 @@ async function handleAddressDetection(message, addressText, apiResult) {
             console.error('❌ Error jailing address poster:', jailError);
         }
         
-        addAuditLog('Address Detected', message.author, `Verified address: ${apiResult.displayName.substring(0, 80)} - User jailed`, 'warning');
+        addAuditLog('Address Detected', message.author, `Verified address: ${apiResult.displayName.substring(0, 80)} - User jailed`, 'error');
         
     } catch (error) {
         console.error('❌ Error handling address detection:', error);
