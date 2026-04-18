@@ -1864,13 +1864,34 @@ async function handleUnjailCommand(interaction) {
     
     if (jailChannel) {
         try {
-            // Create transcript
+            // Create rich transcript including embeds
             const messages = await jailChannel.messages.fetch({ limit: 100 });
-            const transcript = messages.reverse().map(msg => 
-                `[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`
-            ).join('\n');
+            const transcriptLines = ['═══════════════════════════════════════════════',
+                `JAIL TRANSCRIPT: ${jailChannel.name}`,
+                `User: ${targetUser.tag} (${targetUser.id})`,
+                `Unjailed By: ${interaction.user.tag}`,
+                `Date: ${new Date().toLocaleString()}`,
+                '═══════════════════════════════════════════════', ''];
             
-            // Send transcript to jail log channel
+            messages.reverse().forEach(msg => {
+                transcriptLines.push(`[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`);
+                // Include embed data
+                if (msg.embeds && msg.embeds.length > 0) {
+                    msg.embeds.forEach(embed => {
+                        if (embed.title) transcriptLines.push(`  [EMBED] Title: ${embed.title}`);
+                        if (embed.description) transcriptLines.push(`  [EMBED] Description: ${embed.description}`);
+                        if (embed.fields) {
+                            embed.fields.forEach(field => {
+                                transcriptLines.push(`  [EMBED] ${field.name}: ${field.value}`);
+                            });
+                        }
+                        if (embed.footer) transcriptLines.push(`  [EMBED] Footer: ${embed.footer.text}`);
+                    });
+                }
+            });
+            
+            const transcript = transcriptLines.join('\n');
+            
             const logChannel = await client.channels.fetch(JAIL_LOG_CHANNEL_ID);
             if (logChannel) {
                 const transcriptBuffer = Buffer.from(transcript, 'utf-8');
@@ -1883,7 +1904,7 @@ async function handleUnjailCommand(interaction) {
                         { name: 'User', value: `${targetUser.tag} (${targetUser.id})`, inline: true },
                         { name: 'Unjailed By', value: `${interaction.user.tag}`, inline: true },
                     )
-                    .setFooter({ text: 'Transcript attached below' })
+                    .setFooter({ text: 'Full transcript with embed data attached below' })
                     .setTimestamp();
                 
                 await logChannel.send({ embeds: [logEmbed], files: [attachment] });
@@ -1935,11 +1956,32 @@ async function handleCloseCommand(interaction) {
     await interaction.reply({ content: '🗃️ Archiving and closing this channel...' });
     
     try {
-        // Create transcript
+        // Create rich transcript including embeds
         const messages = await channel.messages.fetch({ limit: 100 });
-        const transcript = messages.reverse().map(msg => 
-            `[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`
-        ).join('\n');
+        const transcriptLines = ['═══════════════════════════════════════════════',
+            `CHANNEL TRANSCRIPT: ${channel.name}`,
+            `Closed By: ${interaction.user.tag}`,
+            `Type: ${channel.name.startsWith('jail-') ? 'Jail Channel' : 'Report Channel'}`,
+            `Date: ${new Date().toLocaleString()}`,
+            '═══════════════════════════════════════════════', ''];
+        
+        messages.reverse().forEach(msg => {
+            transcriptLines.push(`[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`);
+            if (msg.embeds && msg.embeds.length > 0) {
+                msg.embeds.forEach(embed => {
+                    if (embed.title) transcriptLines.push(`  [EMBED] Title: ${embed.title}`);
+                    if (embed.description) transcriptLines.push(`  [EMBED] Description: ${embed.description}`);
+                    if (embed.fields) {
+                        embed.fields.forEach(field => {
+                            transcriptLines.push(`  [EMBED] ${field.name}: ${field.value}`);
+                        });
+                    }
+                    if (embed.footer) transcriptLines.push(`  [EMBED] Footer: ${embed.footer.text}`);
+                });
+            }
+        });
+        
+        const transcript = transcriptLines.join('\n');
         
         // Send transcript to log channel
         const logChannel = await client.channels.fetch(JAIL_LOG_CHANNEL_ID);
