@@ -1198,7 +1198,7 @@ async function handleBannedWord(message, triggeredWord) {
                 .setFooter({ text: jailDuration ? 'Will auto-unjail when time expires' : 'Use /unjail to release' })
                 .setTimestamp();
             
-            await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
+            await jailChannel.send({ content: `<@1475473411642884227> <@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
             console.log(`✅ Jail channel created: #${jailChannel.name}`);
             
         } catch (err) {
@@ -1288,26 +1288,32 @@ const POSITIONSTACK_KEY = '3634f9a1fbf5195caecab5352e55d6f9';
 
 // Pre-filter: could this message contain an address?
 function mightContainAddress(text) {
-    if (text.length < 8) return false;
+    if (text.length < 12) return false;
     
     // Must contain a number
     if (!/\d/.test(text)) return false;
     
-    // Skip URLs, code blocks, bot commands
+    // Skip URLs, code blocks, bot commands, emojis-heavy messages
     if (/https?:\/\/|discord\.gg|```|!config|!help|!trivia|!birthday/.test(text)) return false;
     
-    // Look for ANY of these address indicators
     const hasStreetWord = /\b(street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter|pike|crossing|loop)\b/i.test(text);
     const hasZip = /\b\d{5}(-\d{4})?\b/.test(text);
     const hasState = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/.test(text);
-    const hasCommaCity = /,\s*[A-Z][a-z]+/.test(text); // "City, State" pattern
-    const hasNumberStreet = /\d{1,5}\s+\w+/.test(text); // "123 Something"
+    const hasCommaCity = /,\s*[A-Z][a-z]+/.test(text);
+    const hasNumberStreet = /\d{1,5}\s+[A-Z]\w+/.test(text); // "123 Main" (capitalized word after number)
     
-    // Need number + at least one address indicator
-    if (hasStreetWord) return true;
-    if (hasZip && hasNumberStreet) return true;
-    if (hasState && hasCommaCity && hasNumberStreet) return true;
-    if (hasCommaCity && hasNumberStreet && hasZip) return true;
+    // Count how many address components are present
+    let score = 0;
+    if (hasStreetWord) score++;
+    if (hasZip) score++;
+    if (hasState) score++;
+    if (hasCommaCity) score++;
+    if (hasNumberStreet) score++;
+    
+    // Need at least 3 address components to be worth checking
+    // This prevents "8 Straight hours drive" (only has street word + number = 2)
+    // But catches "120 Commercial Pkwy, Branford, CT 06405" (street + comma + state + zip + number = 5)
+    if (score >= 3) return true;
     
     return false;
 }
@@ -1355,15 +1361,17 @@ function verifyAddressWithAPI(text) {
                         if (result.data && result.data.length > 0) {
                             const match = result.data[0];
                             
-                            // Only flag if it's a street-level address (has a street name)
-                            // Confidence threshold: 0.8+ means very likely a real address
-                            const hasStreet = match.street || match.name;
+                            // Only flag if it has BOTH a house number AND a street name
+                            // This prevents "8 Straight Drive" (no house number) false positives
+                            const hasStreet = match.street;
                             const hasNumber = match.number;
+                            const hasLocality = match.locality || match.county;
                             const confidence = match.confidence || 0;
                             
-                            console.log(`🔍 Positionstack result: ${match.label} | confidence: ${confidence} | street: ${match.street} | number: ${match.number} | type: ${match.type}`);
+                            console.log(`🔍 Positionstack result: ${match.label} | confidence: ${confidence} | street: ${match.street} | number: ${match.number} | locality: ${match.locality} | type: ${match.type}`);
                             
-                            if (hasStreet && confidence >= 0.6) {
+                            // Require: street + number + city/locality + high confidence
+                            if (hasStreet && hasNumber && hasLocality && confidence >= 0.8) {
                                 resolve({
                                     verified: true,
                                     displayName: match.label || `${match.number || ''} ${match.street || ''}, ${match.locality || ''}, ${match.region || ''}`,
@@ -1484,7 +1492,7 @@ async function handleAddressDetection(message, addressText, apiResult) {
                 .setFooter({ text: 'Address verified via Positionstack API' })
                 .setTimestamp();
             
-            await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
+            await jailChannel.send({ content: `<@1475473411642884227> <@&1475476293058301952> <@&1475844551737475257> <@${userId}>`, embeds: [embed] });
             
             console.log(`✅ User ${message.author.tag} jailed for posting address`);
             
@@ -1601,7 +1609,7 @@ async function handleReportCommand(interaction) {
         .setTimestamp();
     
     // Ping mod roles and the reporter
-    await channel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${reporter.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
+    await channel.send({ content: `<@1475473411642884227> <@&1475476293058301952> <@&1475844551737475257> <@${reporter.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
     
     addAuditLog('Report Created', { tag: reporter.tag, id: reporter.id }, `Report #${ticketNumber} against ${reportedUser}`, 'warning');
     
@@ -1717,7 +1725,7 @@ async function handleJailCommand(interaction) {
             .setFooter({ text: duration.ms ? 'Will auto-unjail when time expires' : 'Staff can use /unjail to restore access' })
             .setTimestamp();
         
-        await jailChannel.send({ content: `<@&1475476293058301952> <@&1475844551737475257> <@${targetUser.id}>`, embeds: [embed] });
+        await jailChannel.send({ content: `<@1475473411642884227> <@&1475476293058301952> <@&1475844551737475257> <@${targetUser.id}>`, embeds: [embed] });
         
         console.log(`✅ Jail channel created: #${jailChannel.name}`);
         
