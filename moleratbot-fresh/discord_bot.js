@@ -4,93 +4,13 @@ const path = require('path');
 const http = require('http');
 
 // Music dependencies
-let voice, ytdl;
-const https = require('https');
+let voice, playDl;
 try {
     voice = require('@discordjs/voice');
-    ytdl = require('@distube/ytdl-core');
+    playDl = require('play-dl');
     console.log('✅ Music dependencies loaded');
 } catch (e) {
-    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice @distube/ytdl-core libsodium-wrappers');
-}
-
-const YOUTUBE_API_KEY = 'AIzaSyCPPqRDhadg6fNi_ZH8Wigs9KZe0TcvOCc';
-
-// YouTube Data API search
-function searchYouTube(query) {
-    return new Promise((resolve, reject) => {
-        const encoded = encodeURIComponent(query);
-        const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&type=video&q=${encoded}&key=${YOUTUBE_API_KEY}`;
-        
-        https.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const result = JSON.parse(data);
-                    if (result.error) {
-                        console.error('❌ YouTube API error:', result.error.message);
-                        resolve(null);
-                        return;
-                    }
-                    if (result.items && result.items.length > 0) {
-                        const item = result.items[0];
-                        resolve({
-                            id: item.id.videoId,
-                            url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
-                            title: item.snippet.title,
-                            channel: item.snippet.channelTitle,
-                            thumbnail: item.snippet.thumbnails?.default?.url,
-                        });
-                    } else {
-                        resolve(null);
-                    }
-                } catch (e) {
-                    console.error('❌ YouTube API parse error:', e);
-                    resolve(null);
-                }
-            });
-        }).on('error', (e) => {
-            console.error('❌ YouTube API request error:', e);
-            resolve(null);
-        });
-    });
-}
-
-// Get video duration from YouTube API
-function getVideoDuration(videoId) {
-    return new Promise((resolve) => {
-        const url = `https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${videoId}&key=${YOUTUBE_API_KEY}`;
-        
-        https.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const result = JSON.parse(data);
-                    if (result.items && result.items.length > 0) {
-                        const duration = result.items[0].contentDetails.duration; // ISO 8601: PT3M59S
-                        // Parse ISO 8601 duration
-                        const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-                        if (match) {
-                            const hours = parseInt(match[1] || 0);
-                            const mins = parseInt(match[2] || 0);
-                            const secs = parseInt(match[3] || 0);
-                            const totalSeconds = (hours * 3600) + (mins * 60) + secs;
-                            const display = hours > 0 ? `${hours}:${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}` : `${mins}:${String(secs).padStart(2,'0')}`;
-                            resolve({ display, totalSeconds });
-                        } else {
-                            resolve({ display: 'Unknown', totalSeconds: 0 });
-                        }
-                    } else {
-                        resolve({ display: 'Unknown', totalSeconds: 0 });
-                    }
-                } catch (e) {
-                    resolve({ display: 'Unknown', totalSeconds: 0 });
-                }
-            });
-        }).on('error', () => resolve({ display: 'Unknown', totalSeconds: 0 }));
-    });
+    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl libsodium-wrappers');
 }
 
 const client = new Discord.Client({
@@ -2334,7 +2254,7 @@ async function handleMusicCommand(interaction) {
         return;
     }
     
-    if (!voice || !ytdl) {
+    if (!voice || !playDl) {
         await interaction.reply({ content: '❌ Music dependencies not installed. Ask the bot admin to install them.', ephemeral: true });
         return;
     }
@@ -2425,6 +2345,7 @@ async function musicPlay(interaction) {
         return;
     }
     
+    // Check if user is in the same voice channel as the bot
     const memberVoice = interaction.member.voice;
     if (!memberVoice || !memberVoice.channelId || memberVoice.channelId !== MUSIC_VOICE_CHANNEL_ID) {
         await interaction.reply({ content: `❌ You must be in <#${MUSIC_VOICE_CHANNEL_ID}> to request music.`, ephemeral: true });
@@ -2438,62 +2359,74 @@ async function musicPlay(interaction) {
     try {
         let songInfo;
         
-        // Check if it's already a YouTube URL
-        if (input.includes('youtube.com/watch') || input.includes('youtu.be/')) {
-            const videoId = input.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
-            if (!videoId) {
-                await interaction.editReply({ content: '❌ Invalid YouTube URL.' });
-                return;
-            }
-            const duration = await getVideoDuration(videoId);
-            
-            // Get title from ytdl
-            let title = 'Unknown';
-            try {
-                const info = await ytdl.getBasicInfo(`https://www.youtube.com/watch?v=${videoId}`);
-                title = info.videoDetails.title;
-            } catch (e) {}
-            
+        // Check if it's a URL or search query
+        if (playDl.yt_validate(input) === 'video') {
             songInfo = {
-                title: title,
-                url: `https://www.youtube.com/watch?v=${videoId}`,
-                duration: duration.display,
-                durationSeconds: duration.totalSeconds,
+                title: 'Loading...',
+                url: input,
+                duration: 'Unknown',
                 requestedBy: interaction.user.tag,
             };
+            // Get title/duration from video info
+            try {
+                const info = await playDl.video_info(input);
+                songInfo.title = info.video_details.title || 'Unknown';
+                songInfo.duration = info.video_details.durationRaw || 'Unknown';
+            } catch (e) {
+                console.warn('⚠️ Could not fetch video info, using URL directly');
+            }
         } else {
-            // Search using YouTube Data API
-            const result = await searchYouTube(input);
-            if (!result) {
+            // Search YouTube
+            const results = await playDl.search(input, { limit: 1 });
+            if (results.length === 0) {
                 await interaction.editReply({ content: '❌ No results found.' });
                 return;
             }
             
-            const duration = await getVideoDuration(result.id);
+            const result = results[0];
+            // Log ALL properties to find the right URL field
+            console.log(`🔍 Search result keys: ${Object.keys(result).join(', ')}`);
+            console.log(`🔍 Search result: title="${result.title}" url="${result.url}" id="${result.id}" videoId="${result.videoId}"`);
+            
+            // Try every possible URL property
+            let videoUrl = result.url;
+            if (!videoUrl && result.id) videoUrl = `https://www.youtube.com/watch?v=${result.id}`;
+            if (!videoUrl && result.videoId) videoUrl = `https://www.youtube.com/watch?v=${result.videoId}`;
+            if (!videoUrl && result.video_id) videoUrl = `https://www.youtube.com/watch?v=${result.video_id}`;
+            if (!videoUrl && result.link) videoUrl = result.link;
+            if (!videoUrl && result.shortUrl) videoUrl = result.shortUrl;
+            
+            if (!videoUrl) {
+                console.error('❌ Could not extract URL from search result:', JSON.stringify(result).substring(0, 500));
+                await interaction.editReply({ content: '❌ Could not get URL for this song. Try pasting a YouTube link instead.' });
+                return;
+            }
             
             songInfo = {
-                title: result.title,
-                url: result.url,
-                duration: duration.display,
-                durationSeconds: duration.totalSeconds,
+                title: result.title || 'Unknown',
+                url: videoUrl,
+                duration: result.durationRaw || result.duration || 'Unknown',
                 requestedBy: interaction.user.tag,
             };
         }
         
-        console.log(`🎵 Queued: "${songInfo.title}" URL: ${songInfo.url} Duration: ${songInfo.duration}`);
+        console.log(`🎵 Queued: "${songInfo.title}" URL: ${songInfo.url}`);
         
         // Check max duration (8 minutes = 480 seconds)
-        if (songInfo.durationSeconds > 480) {
+        const durationSecs = parseDurationToSeconds(songInfo.duration);
+        if (durationSecs > 480) {
             await interaction.editReply({ content: `❌ **Song too long!** "${songInfo.title}" is ${songInfo.duration}. Max length is **8 minutes**.` });
             return;
         }
         
         musicQueue.push(songInfo);
         
-        await interaction.editReply({ content: `✅ **Added:** ${songInfo.title} (${songInfo.duration}) — Position #${musicQueue.length}` });
+        await interaction.editReply({ content: `✅ **Added:** ${songInfo.title} (${songInfo.duration || 'Unknown'}) — Position #${musicQueue.length}` });
         
+        // Update the persistent queue message
         await updateQueueMessage();
         
+        // If nothing is playing, start playing
         if (!currentSong) {
             await playNextSong(interaction.guild);
         }
@@ -2519,15 +2452,9 @@ async function playNextSong(guild) {
             return;
         }
         
-        // Use @distube/ytdl-core for streaming (more reliable than play-dl)
-        const stream = ytdl(currentSong.url, {
-            filter: 'audioonly',
-            quality: 'highestaudio',
-            highWaterMark: 1 << 25, // 32MB buffer
-        });
-        
-        const resource = voice.createAudioResource(stream, {
-            inputType: voice.StreamType.Arbitrary,
+        const stream = await playDl.stream(currentSong.url);
+        const resource = voice.createAudioResource(stream.stream, {
+            inputType: stream.type,
         });
         
         audioPlayer.play(resource);
@@ -2630,7 +2557,7 @@ function parseDurationToSeconds(duration) {
 // ======================
 
 async function handleMusicTextCommand(message, command, args) {
-    if (!voice || !ytdl) {
+    if (!voice || !playDl) {
         await message.reply('❌ Music dependencies not installed.');
         return;
     }
@@ -2654,58 +2581,48 @@ async function handleMusicTextCommand(message, command, args) {
             return;
         }
         
-        const loadingMsg = await message.reply('🔍 Searching YouTube...');
+        const loadingMsg = await message.reply('🔍 Searching...');
         
         try {
-            let songInfo;
-            
-            // Check if it's a YouTube URL
-            if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
-                const videoId = query.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1];
-                if (!videoId) {
-                    await loadingMsg.edit('❌ Invalid YouTube URL.');
-                    return;
-                }
-                const duration = await getVideoDuration(videoId);
-                let title = 'Unknown';
-                try {
-                    const info = await ytdl.getBasicInfo(`https://www.youtube.com/watch?v=${videoId}`);
-                    title = info.videoDetails.title;
-                } catch (e) {}
-                
-                songInfo = {
-                    title: title,
-                    url: `https://www.youtube.com/watch?v=${videoId}`,
-                    duration: duration.display,
-                    durationSeconds: duration.totalSeconds,
-                    requestedBy: message.author.tag,
-                };
-            } else {
-                // Search using YouTube Data API
-                const result = await searchYouTube(query);
-                if (!result) {
-                    await loadingMsg.edit('❌ No results found.');
-                    return;
-                }
-                
-                console.log(`🔍 YouTube API result: "${result.title}" URL: ${result.url}`);
-                
-                const duration = await getVideoDuration(result.id);
-                
-                songInfo = {
-                    title: result.title,
-                    url: result.url,
-                    duration: duration.display,
-                    durationSeconds: duration.totalSeconds,
-                    requestedBy: message.author.tag,
-                };
-            }
-            
-            // Check max duration (8 minutes = 480 seconds)
-            if (songInfo.durationSeconds > 480) {
-                await loadingMsg.edit(`❌ **Song too long!** "${songInfo.title}" is ${songInfo.duration}. Max length is **8 minutes**.`);
+            const results = await playDl.search(query, { limit: 1 });
+            if (results.length === 0) {
+                await loadingMsg.edit('❌ No results found.');
                 return;
             }
+            
+            const result = results[0];
+            console.log(`🔍 Text search keys: ${Object.keys(result).join(', ')}`);
+            console.log(`🔍 Text search result: title="${result.title}" url="${result.url}" id="${result.id}" videoId="${result.videoId}"`);
+            
+            // Try every possible URL property
+            let videoUrl = result.url;
+            if (!videoUrl && result.id) videoUrl = `https://www.youtube.com/watch?v=${result.id}`;
+            if (!videoUrl && result.videoId) videoUrl = `https://www.youtube.com/watch?v=${result.videoId}`;
+            if (!videoUrl && result.video_id) videoUrl = `https://www.youtube.com/watch?v=${result.video_id}`;
+            if (!videoUrl && result.link) videoUrl = result.link;
+            if (!videoUrl && result.shortUrl) videoUrl = result.shortUrl;
+            
+            if (!videoUrl) {
+                console.error('❌ Could not extract URL:', JSON.stringify(result).substring(0, 500));
+                await loadingMsg.edit('❌ Could not get URL for this song. Try pasting a YouTube link instead.');
+                return;
+            }
+            
+            const duration = result.durationRaw || result.duration || 'Unknown';
+            
+            // Check max duration (8 minutes = 480 seconds)
+            const durationSecs = parseDurationToSeconds(duration);
+            if (durationSecs > 480) {
+                await loadingMsg.edit(`❌ **Song too long!** "${result.title}" is ${duration}. Max length is **8 minutes**.`);
+                return;
+            }
+            
+            const songInfo = {
+                title: result.title || 'Unknown',
+                url: videoUrl,
+                duration: duration,
+                requestedBy: message.author.tag,
+            };
             
             console.log(`🎵 Text queued: "${songInfo.title}" URL: ${songInfo.url}`);
             
@@ -2713,8 +2630,10 @@ async function handleMusicTextCommand(message, command, args) {
             
             await loadingMsg.edit(`✅ **Added:** ${songInfo.title} (${songInfo.duration}) — Position #${musicQueue.length}`);
             
+            // Delete the confirmation after 5 seconds to keep chat clean
             setTimeout(() => loadingMsg.delete().catch(() => {}), 5000);
             
+            // Update the persistent queue message
             await updateQueueMessage();
             
             if (!currentSong) {
