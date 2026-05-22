@@ -6,20 +6,10 @@
   "scripts": {
     "start": "node discord_bot.js"
   },
-  "keywords": [
-    "discord",
-    "bot",
-    "moleratbot",
-    "trivia",
-    "moderation",
-    "music"
-  ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.14.1",
     "@discordjs/voice": "^0.16.1",
-    "play-dl": "^1.9.7",
+    "@distube/ytdl-core": "^4.16.12",
     "libsodium-wrappers": "^0.7.13"
   },
   "engines": {
