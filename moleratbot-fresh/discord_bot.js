@@ -10,7 +10,8 @@ try {
     playDl = require('play-dl');
     console.log('✅ Music dependencies loaded');
 } catch (e) {
-    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl libsodium-wrappers');
+    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl libsodium-wrappers ffmpeg-static');
+    console.warn('Missing music dependency error:', e.message);
 }
 
 const client = new Discord.Client({
