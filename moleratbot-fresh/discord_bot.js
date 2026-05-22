@@ -3,6 +3,16 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
+// Music dependencies
+let voice, playDl;
+try {
+    voice = require('@discordjs/voice');
+    playDl = require('play-dl');
+    console.log('✅ Music dependencies loaded');
+} catch (e) {
+    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl libsodium-wrappers');
+}
+
 const client = new Discord.Client({
     intents: [
         Discord.GatewayIntentBits.Guilds,
@@ -490,6 +500,38 @@ client.on('ready', async () => {
             new Discord.SlashCommandBuilder()
                 .setName('close')
                 .setDescription('Close a jail channel without unjailing (for bans)')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('join')
+                .setDescription('Bot joins the music voice channel')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('leave')
+                .setDescription('Bot leaves the voice channel')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('play')
+                .setDescription('Play a YouTube video in voice chat')
+                .addStringOption(option =>
+                    option.setName('url')
+                        .setDescription('YouTube URL or search query')
+                        .setRequired(true))
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('skip')
+                .setDescription('Skip the current song')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('queue')
+                .setDescription('Show the music queue')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('nowplaying')
+                .setDescription('Show what\'s currently playing')
+                .toJSON(),
+            new Discord.SlashCommandBuilder()
+                .setName('clear')
+                .setDescription('Clear the entire music queue')
                 .toJSON()
         ];
         
@@ -882,8 +924,11 @@ client.on('messageCreate', async (message) => {
     // Ignore bots
     if (message.author.bot) return;
     
-    // Ignore DMs (reports now use /report slash command)
-    if (!message.guild) return;
+    // DM handling - report system
+    if (!message.guild) {
+        await handleDMReport(message);
+        return;
+    }
     
     // Staff are exempt from word filter
     const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
@@ -1508,6 +1553,96 @@ async function handleAddressDetection(message, addressText, apiResult) {
 }
 
 // ======================
+// DM REPORT SYSTEM
+// ======================
+
+const dmReportStates = new Map(); // userId -> { step, who, reason }
+
+async function handleDMReport(message) {
+    const userId = message.author.id;
+    const state = dmReportStates.get(userId);
+    
+    try {
+        if (!state) {
+            await message.reply('👤 **Who are you reporting?** (Username or @mention)');
+            dmReportStates.set(userId, { step: 'who' });
+            console.log(`📝 DM Report started by ${message.author.tag}`);
+            return;
+        }
+        
+        if (state.step === 'who') {
+            state.who = message.content;
+            state.step = 'reason';
+            await message.reply('📄 **Why are you reporting them?** (Describe what happened)');
+            return;
+        }
+        
+        if (state.step === 'reason') {
+            state.reason = message.content;
+            dmReportStates.delete(userId);
+            await createDMReport(message.author, state);
+            return;
+        }
+    } catch (error) {
+        console.error('❌ Error in DM report system:', error);
+        dmReportStates.delete(userId);
+        try {
+            await message.reply('❌ Something went wrong. Please try again or use `/report` in the server.');
+        } catch (e) {}
+    }
+}
+
+async function createDMReport(user, state) {
+    const guild = client.guilds.cache.first();
+    if (!guild) {
+        await user.send('❌ Error creating report. Bot is not connected to a server.');
+        return;
+    }
+    
+    const ticketNumber = Math.floor(Math.random() * 9999);
+    const channelName = `report-${ticketNumber}`;
+    
+    try {
+        const channel = await guild.channels.create({
+            name: channelName,
+            type: Discord.ChannelType.GuildText,
+            parent: '1476547355355512872',
+            permissionOverwrites: [
+                { id: guild.id, deny: [Discord.PermissionFlagsBits.ViewChannel] },
+                { id: user.id, allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+                { id: '1475476293058301952', allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+                { id: '1475844551737475257', allow: [Discord.PermissionFlagsBits.ViewChannel, Discord.PermissionFlagsBits.SendMessages, Discord.PermissionFlagsBits.ReadMessageHistory] },
+            ],
+        });
+        
+        const embed = new Discord.EmbedBuilder()
+            .setColor('#FF0000')
+            .setTitle('🚨 New User Report (via DM)')
+            .setThumbnail(user.displayAvatarURL())
+            .addFields(
+                { name: 'Reported By', value: `${user.tag} (${user.id})`, inline: true },
+                { name: 'Reporting', value: state.who, inline: true },
+                { name: 'Reason', value: state.reason },
+                { name: 'Status', value: '🔍 Awaiting mod review', inline: true }
+            )
+            .setFooter({ text: 'Use !close or /close to archive this report' })
+            .setTimestamp();
+        
+        await channel.send({ content: `<@1475473411642884227> <@&1475476293058301952> <@&1475844551737475257> <@${user.id}>\n\nMods will be with you shortly. You can chat here.`, embeds: [embed] });
+        
+        addAuditLog('DM Report Created', { tag: user.tag, id: user.id }, `Report #${ticketNumber} against ${state.who}`, 'warning');
+        
+        await user.send(`✅ Your report has been created! Head to <#${channel.id}> to chat with the mods.`);
+        
+    } catch (error) {
+        console.error('❌ Error creating DM report:', error);
+        try {
+            await user.send('❌ Error creating the report. Please try `/report` in the server.');
+        } catch (e) {}
+    }
+}
+
+// ======================
 // /REPORT SLASH COMMAND
 // ======================
 
@@ -1528,6 +1663,8 @@ client.on('interactionCreate', async (interaction) => {
             await handleUnjailCommand(interaction);
         } else if (interaction.commandName === 'close') {
             await handleCloseCommand(interaction);
+        } else if (['join', 'leave', 'play', 'skip', 'queue', 'nowplaying', 'clear'].includes(interaction.commandName)) {
+            await handleMusicCommand(interaction);
         }
     } catch (error) {
         console.error('❌ Error in slash command:', error);
@@ -2020,6 +2157,285 @@ async function handleCloseCommand(interaction) {
     } catch (error) {
         console.error('❌ Error closing channel:', error);
     }
+}
+
+// ======================
+// MUSIC SYSTEM
+// ======================
+
+const MUSIC_CHANNEL_ID = '1507520750503067648'; // Music request channel
+const MUSIC_VOICE_CHANNEL_ID = '1492298788935565552'; // Voice channel bot joins
+
+const musicQueue = []; // { title, url, requestedBy }
+let currentSong = null;
+let musicConnection = null;
+let audioPlayer = null;
+
+async function handleMusicCommand(interaction) {
+    const cmd = interaction.commandName;
+    
+    // Only allow music commands in the music channel
+    if (interaction.channelId !== MUSIC_CHANNEL_ID) {
+        await interaction.reply({ content: `❌ Music commands only work in <#${MUSIC_CHANNEL_ID}>`, ephemeral: true });
+        return;
+    }
+    
+    if (!voice || !playDl) {
+        await interaction.reply({ content: '❌ Music dependencies not installed. Ask the bot admin to install them.', ephemeral: true });
+        return;
+    }
+    
+    if (cmd === 'join') {
+        await musicJoin(interaction);
+    } else if (cmd === 'leave') {
+        await musicLeave(interaction);
+    } else if (cmd === 'play') {
+        await musicPlay(interaction);
+    } else if (cmd === 'skip') {
+        await musicSkip(interaction);
+    } else if (cmd === 'queue') {
+        await musicShowQueue(interaction);
+    } else if (cmd === 'nowplaying') {
+        await musicNowPlaying(interaction);
+    } else if (cmd === 'clear') {
+        await musicClear(interaction);
+    }
+}
+
+async function musicJoin(interaction) {
+    const guild = interaction.guild;
+    
+    try {
+        const voiceChannel = await guild.channels.fetch(MUSIC_VOICE_CHANNEL_ID);
+        if (!voiceChannel) {
+            await interaction.reply({ content: '❌ Music voice channel not found.', ephemeral: true });
+            return;
+        }
+        
+        musicConnection = voice.joinVoiceChannel({
+            channelId: MUSIC_VOICE_CHANNEL_ID,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
+            selfDeaf: false,
+        });
+        
+        audioPlayer = voice.createAudioPlayer({
+            behaviors: { noSubscriber: voice.NoSubscriberBehavior.Pause },
+        });
+        
+        musicConnection.subscribe(audioPlayer);
+        
+        audioPlayer.on(voice.AudioPlayerStatus.Idle, () => {
+            currentSong = null;
+            if (musicQueue.length > 0) {
+                playNextSong(guild);
+            }
+        });
+        
+        audioPlayer.on('error', (error) => {
+            console.error('❌ Audio player error:', error);
+            currentSong = null;
+            if (musicQueue.length > 0) {
+                playNextSong(guild);
+            }
+        });
+        
+        await interaction.reply({ content: `✅ Joined <#${MUSIC_VOICE_CHANNEL_ID}>! Use \`/play <url>\` to queue a song.` });
+        addAuditLog('Music Join', interaction.user, `Bot joined voice channel`, 'info');
+        
+    } catch (error) {
+        console.error('❌ Error joining voice:', error);
+        await interaction.reply({ content: '❌ Error joining voice channel: ' + error.message, ephemeral: true });
+    }
+}
+
+async function musicLeave(interaction) {
+    if (musicConnection) {
+        musicConnection.destroy();
+        musicConnection = null;
+        audioPlayer = null;
+        currentSong = null;
+        musicQueue.length = 0;
+        await interaction.reply({ content: '👋 Left the voice channel. Queue cleared.' });
+        addAuditLog('Music Leave', interaction.user, 'Bot left voice channel', 'info');
+    } else {
+        await interaction.reply({ content: '❌ Bot is not in a voice channel.', ephemeral: true });
+    }
+}
+
+async function musicPlay(interaction) {
+    if (!musicConnection) {
+        await interaction.reply({ content: '❌ Bot is not in a voice channel. Use `/join` first.', ephemeral: true });
+        return;
+    }
+    
+    await interaction.deferReply();
+    
+    const input = interaction.options.getString('url');
+    
+    try {
+        let songInfo;
+        
+        // Check if it's a URL or search query
+        if (playDl.yt_validate(input) === 'video') {
+            const info = await playDl.video_info(input);
+            songInfo = {
+                title: info.video_details.title,
+                url: input,
+                duration: info.video_details.durationRaw,
+                requestedBy: interaction.user.tag,
+            };
+        } else {
+            // Search YouTube
+            const results = await playDl.search(input, { limit: 1 });
+            if (results.length === 0) {
+                await interaction.editReply({ content: '❌ No results found.' });
+                return;
+            }
+            songInfo = {
+                title: results[0].title,
+                url: results[0].url,
+                duration: results[0].durationRaw,
+                requestedBy: interaction.user.tag,
+            };
+        }
+        
+        musicQueue.push(songInfo);
+        
+        const embed = new Discord.EmbedBuilder()
+            .setColor('#FF0000')
+            .setTitle('🎵 Added to Queue')
+            .setDescription(`**${songInfo.title}**`)
+            .addFields(
+                { name: 'Duration', value: songInfo.duration || 'Unknown', inline: true },
+                { name: 'Position', value: `#${musicQueue.length}`, inline: true },
+                { name: 'Requested By', value: songInfo.requestedBy, inline: true }
+            )
+            .setTimestamp();
+        
+        await interaction.editReply({ embeds: [embed] });
+        
+        // If nothing is playing, start playing
+        if (!currentSong) {
+            await playNextSong(interaction.guild);
+        }
+        
+    } catch (error) {
+        console.error('❌ Error adding song:', error);
+        await interaction.editReply({ content: '❌ Error: ' + error.message });
+    }
+}
+
+async function playNextSong(guild) {
+    if (musicQueue.length === 0 || !musicConnection || !audioPlayer) return;
+    
+    currentSong = musicQueue.shift();
+    
+    try {
+        const stream = await playDl.stream(currentSong.url);
+        const resource = voice.createAudioResource(stream.stream, {
+            inputType: stream.type,
+        });
+        
+        audioPlayer.play(resource);
+        
+        // Announce in music channel
+        try {
+            const musicChannel = await client.channels.fetch(MUSIC_CHANNEL_ID);
+            const embed = new Discord.EmbedBuilder()
+                .setColor('#00FF00')
+                .setTitle('🎶 Now Playing')
+                .setDescription(`**${currentSong.title}**`)
+                .addFields(
+                    { name: 'Duration', value: currentSong.duration || 'Unknown', inline: true },
+                    { name: 'Requested By', value: currentSong.requestedBy, inline: true },
+                    { name: 'Queue', value: `${musicQueue.length} song(s) remaining`, inline: true }
+                )
+                .setTimestamp();
+            
+            await musicChannel.send({ embeds: [embed] });
+        } catch (e) {
+            console.error('❌ Error announcing song:', e);
+        }
+        
+        console.log(`🎵 Now playing: ${currentSong.title}`);
+        
+    } catch (error) {
+        console.error('❌ Error playing song:', error);
+        // Try next song
+        if (musicQueue.length > 0) {
+            playNextSong(guild);
+        }
+    }
+}
+
+async function musicSkip(interaction) {
+    if (!audioPlayer || !currentSong) {
+        await interaction.reply({ content: '❌ Nothing is playing.', ephemeral: true });
+        return;
+    }
+    
+    const skipped = currentSong.title;
+    audioPlayer.stop(); // This triggers the Idle event which plays next song
+    await interaction.reply({ content: `⏭️ Skipped: **${skipped}**` });
+}
+
+async function musicShowQueue(interaction) {
+    if (musicQueue.length === 0 && !currentSong) {
+        await interaction.reply({ content: '📭 Queue is empty. Use `/play` to add songs.', ephemeral: true });
+        return;
+    }
+    
+    let description = '';
+    
+    if (currentSong) {
+        description += `🎶 **Now Playing:** ${currentSong.title} (${currentSong.duration || '?'})\n\n`;
+    }
+    
+    if (musicQueue.length > 0) {
+        description += '**Up Next:**\n';
+        musicQueue.slice(0, 10).forEach((song, i) => {
+            description += `${i + 1}. ${song.title} (${song.duration || '?'}) — *${song.requestedBy}*\n`;
+        });
+        if (musicQueue.length > 10) {
+            description += `\n...and ${musicQueue.length - 10} more`;
+        }
+    }
+    
+    const embed = new Discord.EmbedBuilder()
+        .setColor('#5865F2')
+        .setTitle('🎵 Music Queue')
+        .setDescription(description)
+        .setFooter({ text: `${musicQueue.length} song(s) in queue` })
+        .setTimestamp();
+    
+    await interaction.reply({ embeds: [embed] });
+}
+
+async function musicNowPlaying(interaction) {
+    if (!currentSong) {
+        await interaction.reply({ content: '❌ Nothing is playing right now.', ephemeral: true });
+        return;
+    }
+    
+    const embed = new Discord.EmbedBuilder()
+        .setColor('#00FF00')
+        .setTitle('🎶 Now Playing')
+        .setDescription(`**${currentSong.title}**`)
+        .addFields(
+            { name: 'Duration', value: currentSong.duration || 'Unknown', inline: true },
+            { name: 'Requested By', value: currentSong.requestedBy, inline: true },
+            { name: 'URL', value: currentSong.url }
+        )
+        .setTimestamp();
+    
+    await interaction.reply({ embeds: [embed] });
+}
+
+async function musicClear(interaction) {
+    const count = musicQueue.length;
+    musicQueue.length = 0;
+    await interaction.reply({ content: `🗑️ Cleared ${count} song(s) from the queue.` });
 }
 
 // ======================
