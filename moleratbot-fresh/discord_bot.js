@@ -934,6 +934,16 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
+    // Music text commands — check FIRST before any filters
+    if (message.channel.id === MUSIC_CHANNEL_ID && message.content.startsWith('!')) {
+        const args = message.content.slice(1).trim().split(/ +/);
+        const command = args[0].toLowerCase();
+        if (['play', 'skip', 'queue', 'np', 'nowplaying', 'clear'].includes(command)) {
+            await handleMusicTextCommand(message, command, args.slice(1));
+            return;
+        }
+    }
+    
     // Staff are exempt from word filter
     const HARDCODED_STAFF_ROLES = ['1475476293058301952', '1475844551737475257'];
     const isStaffForFilter = message.member.roles.cache.some(role => 
@@ -1017,12 +1027,6 @@ client.on('messageCreate', async (message) => {
         
         if (command === 'vibecheck') {
             await performVibeCheck(message);
-            return;
-        }
-        
-        // Music text commands (only in music request channel)
-        if (message.channel.id === MUSIC_CHANNEL_ID && ['play', 'skip', 'queue', 'np', 'nowplaying', 'clear'].includes(command)) {
-            await handleMusicTextCommand(message, command, args.slice(1));
             return;
         }
         
@@ -2357,13 +2361,20 @@ async function musicPlay(interaction) {
         
         // Check if it's a URL or search query
         if (playDl.yt_validate(input) === 'video') {
-            const info = await playDl.video_info(input);
             songInfo = {
-                title: info.video_details.title,
-                url: info.video_details.url || input,
-                duration: info.video_details.durationRaw,
+                title: 'Loading...',
+                url: input,
+                duration: 'Unknown',
                 requestedBy: interaction.user.tag,
             };
+            // Get title/duration from video info
+            try {
+                const info = await playDl.video_info(input);
+                songInfo.title = info.video_details.title || 'Unknown';
+                songInfo.duration = info.video_details.durationRaw || 'Unknown';
+            } catch (e) {
+                console.warn('⚠️ Could not fetch video info, using URL directly');
+            }
         } else {
             // Search YouTube
             const results = await playDl.search(input, { limit: 1 });
@@ -2373,10 +2384,23 @@ async function musicPlay(interaction) {
             }
             
             const result = results[0];
-            console.log(`🔍 Search result: title="${result.title}" url="${result.url}" id="${result.id}"`);
+            // Log ALL properties to find the right URL field
+            console.log(`🔍 Search result keys: ${Object.keys(result).join(', ')}`);
+            console.log(`🔍 Search result: title="${result.title}" url="${result.url}" id="${result.id}" videoId="${result.videoId}"`);
             
-            // Get URL - try multiple properties
-            const videoUrl = result.url || `https://www.youtube.com/watch?v=${result.id}`;
+            // Try every possible URL property
+            let videoUrl = result.url;
+            if (!videoUrl && result.id) videoUrl = `https://www.youtube.com/watch?v=${result.id}`;
+            if (!videoUrl && result.videoId) videoUrl = `https://www.youtube.com/watch?v=${result.videoId}`;
+            if (!videoUrl && result.video_id) videoUrl = `https://www.youtube.com/watch?v=${result.video_id}`;
+            if (!videoUrl && result.link) videoUrl = result.link;
+            if (!videoUrl && result.shortUrl) videoUrl = result.shortUrl;
+            
+            if (!videoUrl) {
+                console.error('❌ Could not extract URL from search result:', JSON.stringify(result).substring(0, 500));
+                await interaction.editReply({ content: '❌ Could not get URL for this song. Try pasting a YouTube link instead.' });
+                return;
+            }
             
             songInfo = {
                 title: result.title || 'Unknown',
@@ -2567,9 +2591,23 @@ async function handleMusicTextCommand(message, command, args) {
             }
             
             const result = results[0];
-            console.log(`🔍 Text search result: title="${result.title}" url="${result.url}" id="${result.id}" duration="${result.durationRaw}"`);
+            console.log(`🔍 Text search keys: ${Object.keys(result).join(', ')}`);
+            console.log(`🔍 Text search result: title="${result.title}" url="${result.url}" id="${result.id}" videoId="${result.videoId}"`);
             
-            const videoUrl = result.url || `https://www.youtube.com/watch?v=${result.id}`;
+            // Try every possible URL property
+            let videoUrl = result.url;
+            if (!videoUrl && result.id) videoUrl = `https://www.youtube.com/watch?v=${result.id}`;
+            if (!videoUrl && result.videoId) videoUrl = `https://www.youtube.com/watch?v=${result.videoId}`;
+            if (!videoUrl && result.video_id) videoUrl = `https://www.youtube.com/watch?v=${result.video_id}`;
+            if (!videoUrl && result.link) videoUrl = result.link;
+            if (!videoUrl && result.shortUrl) videoUrl = result.shortUrl;
+            
+            if (!videoUrl) {
+                console.error('❌ Could not extract URL:', JSON.stringify(result).substring(0, 500));
+                await loadingMsg.edit('❌ Could not get URL for this song. Try pasting a YouTube link instead.');
+                return;
+            }
+            
             const duration = result.durationRaw || result.duration || 'Unknown';
             
             // Check max duration (8 minutes = 480 seconds)
