@@ -47,6 +47,10 @@ const CONFIG = {
     LOCATIONIQ_API_KEY: process.env.LOCATIONIQ_API_KEY || '',
 };
 
+// Music channel configuration
+const MUSIC_CHANNEL_ID = '1507520750503067648'; // Music request text channel
+const MUSIC_VOICE_CHANNEL_ID = '1492298788935565552'; // Voice channel bot joins
+
 // Patrol channel tracking
 const patrolCooldowns = new Map(); // userId -> lastPostTimestamp
 const PATROL_COOLDOWN = 16 * 60 * 60 * 1000; // 16 hours in milliseconds
@@ -1013,6 +1017,12 @@ client.on('messageCreate', async (message) => {
         
         if (command === 'vibecheck') {
             await performVibeCheck(message);
+            return;
+        }
+        
+        // Music text commands (only in music request channel)
+        if (message.channel.id === MUSIC_CHANNEL_ID && ['play', 'skip', 'queue', 'np', 'nowplaying', 'clear'].includes(command)) {
+            await handleMusicTextCommand(message, command, args.slice(1));
             return;
         }
         
@@ -2163,13 +2173,73 @@ async function handleCloseCommand(interaction) {
 // MUSIC SYSTEM
 // ======================
 
-const MUSIC_CHANNEL_ID = '1507520750503067648'; // Music request channel
-const MUSIC_VOICE_CHANNEL_ID = '1492298788935565552'; // Voice channel bot joins
+// Music channel IDs are declared at the top of the file
 
 const musicQueue = []; // { title, url, requestedBy }
 let currentSong = null;
 let musicConnection = null;
 let audioPlayer = null;
+let queueMessage = null; // Persistent queue message that gets edited
+let requestsSinceLastPost = 0; // Counter to repost queue every 5 requests
+
+// Build queue embed
+function buildQueueEmbed() {
+    let description = '';
+    
+    if (currentSong) {
+        description += `🎶 **Now Playing:** ${currentSong.title} (${currentSong.duration || '?'}) — *${currentSong.requestedBy}*\n\n`;
+    } else {
+        description += '🔇 **Nothing playing**\n\n';
+    }
+    
+    if (musicQueue.length > 0) {
+        description += '**Up Next:**\n';
+        musicQueue.slice(0, 15).forEach((song, i) => {
+            description += `\`${i + 1}.\` ${song.title} (${song.duration || '?'}) — *${song.requestedBy}*\n`;
+        });
+        if (musicQueue.length > 15) {
+            description += `\n...and ${musicQueue.length - 15} more`;
+        }
+    } else {
+        description += '*Queue is empty. Use `!play <song>` to add songs.*';
+    }
+    
+    return new Discord.EmbedBuilder()
+        .setColor('#5865F2')
+        .setTitle('🎵 Music Queue')
+        .setDescription(description)
+        .setFooter({ text: `${musicQueue.length} song(s) in queue | Max song length: 8 min` })
+        .setTimestamp();
+}
+
+// Update or repost the queue message
+async function updateQueueMessage() {
+    try {
+        const musicChannel = await client.channels.fetch(MUSIC_CHANNEL_ID);
+        if (!musicChannel) return;
+        
+        const embed = buildQueueEmbed();
+        requestsSinceLastPost++;
+        
+        // Try to edit existing message, or post new one every 5 requests
+        if (queueMessage && requestsSinceLastPost < 5) {
+            try {
+                await queueMessage.edit({ embeds: [embed] });
+                return;
+            } catch (e) {
+                // Message was deleted or too old, post a new one
+                queueMessage = null;
+            }
+        }
+        
+        // Post a fresh queue message
+        requestsSinceLastPost = 0;
+        queueMessage = await musicChannel.send({ embeds: [embed] });
+        
+    } catch (error) {
+        console.error('❌ Error updating queue message:', error);
+    }
+}
 
 async function handleMusicCommand(interaction) {
     const cmd = interaction.commandName;
@@ -2229,6 +2299,8 @@ async function musicJoin(interaction) {
             currentSong = null;
             if (musicQueue.length > 0) {
                 playNextSong(guild);
+            } else {
+                updateQueueMessage(); // Show empty queue
             }
         });
         
@@ -2269,6 +2341,13 @@ async function musicPlay(interaction) {
         return;
     }
     
+    // Check if user is in the same voice channel as the bot
+    const memberVoice = interaction.member.voice;
+    if (!memberVoice || !memberVoice.channelId || memberVoice.channelId !== MUSIC_VOICE_CHANNEL_ID) {
+        await interaction.reply({ content: `❌ You must be in <#${MUSIC_VOICE_CHANNEL_ID}> to request music.`, ephemeral: true });
+        return;
+    }
+    
     await interaction.deferReply();
     
     const input = interaction.options.getString('url');
@@ -2281,7 +2360,7 @@ async function musicPlay(interaction) {
             const info = await playDl.video_info(input);
             songInfo = {
                 title: info.video_details.title,
-                url: input,
+                url: info.video_details.url || input,
                 duration: info.video_details.durationRaw,
                 requestedBy: interaction.user.tag,
             };
@@ -2292,28 +2371,36 @@ async function musicPlay(interaction) {
                 await interaction.editReply({ content: '❌ No results found.' });
                 return;
             }
+            
+            const result = results[0];
+            console.log(`🔍 Search result: title="${result.title}" url="${result.url}" id="${result.id}"`);
+            
+            // Get URL - try multiple properties
+            const videoUrl = result.url || `https://www.youtube.com/watch?v=${result.id}`;
+            
             songInfo = {
-                title: results[0].title,
-                url: results[0].url,
-                duration: results[0].durationRaw,
+                title: result.title || 'Unknown',
+                url: videoUrl,
+                duration: result.durationRaw || result.duration || 'Unknown',
                 requestedBy: interaction.user.tag,
             };
         }
         
+        console.log(`🎵 Queued: "${songInfo.title}" URL: ${songInfo.url}`);
+        
+        // Check max duration (8 minutes = 480 seconds)
+        const durationSecs = parseDurationToSeconds(songInfo.duration);
+        if (durationSecs > 480) {
+            await interaction.editReply({ content: `❌ **Song too long!** "${songInfo.title}" is ${songInfo.duration}. Max length is **8 minutes**.` });
+            return;
+        }
+        
         musicQueue.push(songInfo);
         
-        const embed = new Discord.EmbedBuilder()
-            .setColor('#FF0000')
-            .setTitle('🎵 Added to Queue')
-            .setDescription(`**${songInfo.title}**`)
-            .addFields(
-                { name: 'Duration', value: songInfo.duration || 'Unknown', inline: true },
-                { name: 'Position', value: `#${musicQueue.length}`, inline: true },
-                { name: 'Requested By', value: songInfo.requestedBy, inline: true }
-            )
-            .setTimestamp();
+        await interaction.editReply({ content: `✅ **Added:** ${songInfo.title} (${songInfo.duration || 'Unknown'}) — Position #${musicQueue.length}` });
         
-        await interaction.editReply({ embeds: [embed] });
+        // Update the persistent queue message
+        await updateQueueMessage();
         
         // If nothing is playing, start playing
         if (!currentSong) {
@@ -2332,6 +2419,15 @@ async function playNextSong(guild) {
     currentSong = musicQueue.shift();
     
     try {
+        console.log(`🎵 Attempting to play: "${currentSong.title}" URL: ${currentSong.url}`);
+        
+        if (!currentSong.url || currentSong.url === 'undefined') {
+            console.error('❌ Invalid URL for song:', currentSong.title);
+            currentSong = null;
+            if (musicQueue.length > 0) playNextSong(guild);
+            return;
+        }
+        
         const stream = await playDl.stream(currentSong.url);
         const resource = voice.createAudioResource(stream.stream, {
             inputType: stream.type,
@@ -2339,24 +2435,8 @@ async function playNextSong(guild) {
         
         audioPlayer.play(resource);
         
-        // Announce in music channel
-        try {
-            const musicChannel = await client.channels.fetch(MUSIC_CHANNEL_ID);
-            const embed = new Discord.EmbedBuilder()
-                .setColor('#00FF00')
-                .setTitle('🎶 Now Playing')
-                .setDescription(`**${currentSong.title}**`)
-                .addFields(
-                    { name: 'Duration', value: currentSong.duration || 'Unknown', inline: true },
-                    { name: 'Requested By', value: currentSong.requestedBy, inline: true },
-                    { name: 'Queue', value: `${musicQueue.length} song(s) remaining`, inline: true }
-                )
-                .setTimestamp();
-            
-            await musicChannel.send({ embeds: [embed] });
-        } catch (e) {
-            console.error('❌ Error announcing song:', e);
-        }
+        // Update the queue message to show now playing
+        await updateQueueMessage();
         
         console.log(`🎵 Now playing: ${currentSong.title}`);
         
@@ -2436,6 +2516,158 @@ async function musicClear(interaction) {
     const count = musicQueue.length;
     musicQueue.length = 0;
     await interaction.reply({ content: `🗑️ Cleared ${count} song(s) from the queue.` });
+}
+
+// Parse duration string like "6:11" or "1:23:45" to seconds
+function parseDurationToSeconds(duration) {
+    if (!duration || duration === 'Unknown') return 0;
+    const str = String(duration);
+    const parts = str.split(':').map(Number);
+    if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+    if (parts.length === 2) return (parts[0] * 60) + parts[1];
+    return parseInt(str) || 0;
+}
+
+// ======================
+// !play TEXT COMMAND (music request channel only)
+// ======================
+
+async function handleMusicTextCommand(message, command, args) {
+    if (!voice || !playDl) {
+        await message.reply('❌ Music dependencies not installed.');
+        return;
+    }
+    
+    if (command === 'play') {
+        const query = args.join(' ');
+        if (!query) {
+            await message.reply('❌ Usage: `!play <song name>` or `!play <artist> - <song>`');
+            return;
+        }
+        
+        if (!musicConnection) {
+            await message.reply('❌ Bot is not in a voice channel. A staff member needs to use `/join` first.');
+            return;
+        }
+        
+        // Check if user is in the same voice channel as the bot
+        const memberVoice = message.member.voice;
+        if (!memberVoice || !memberVoice.channelId || memberVoice.channelId !== MUSIC_VOICE_CHANNEL_ID) {
+            await message.reply(`❌ You must be in <#${MUSIC_VOICE_CHANNEL_ID}> to request music.`);
+            return;
+        }
+        
+        const loadingMsg = await message.reply('🔍 Searching...');
+        
+        try {
+            const results = await playDl.search(query, { limit: 1 });
+            if (results.length === 0) {
+                await loadingMsg.edit('❌ No results found.');
+                return;
+            }
+            
+            const result = results[0];
+            console.log(`🔍 Text search result: title="${result.title}" url="${result.url}" id="${result.id}" duration="${result.durationRaw}"`);
+            
+            const videoUrl = result.url || `https://www.youtube.com/watch?v=${result.id}`;
+            const duration = result.durationRaw || result.duration || 'Unknown';
+            
+            // Check max duration (8 minutes = 480 seconds)
+            const durationSecs = parseDurationToSeconds(duration);
+            if (durationSecs > 480) {
+                await loadingMsg.edit(`❌ **Song too long!** "${result.title}" is ${duration}. Max length is **8 minutes**.`);
+                return;
+            }
+            
+            const songInfo = {
+                title: result.title || 'Unknown',
+                url: videoUrl,
+                duration: duration,
+                requestedBy: message.author.tag,
+            };
+            
+            console.log(`🎵 Text queued: "${songInfo.title}" URL: ${songInfo.url}`);
+            
+            musicQueue.push(songInfo);
+            
+            await loadingMsg.edit(`✅ **Added:** ${songInfo.title} (${songInfo.duration}) — Position #${musicQueue.length}`);
+            
+            // Delete the confirmation after 5 seconds to keep chat clean
+            setTimeout(() => loadingMsg.delete().catch(() => {}), 5000);
+            
+            // Update the persistent queue message
+            await updateQueueMessage();
+            
+            if (!currentSong) {
+                await playNextSong(message.guild);
+            }
+            
+        } catch (error) {
+            console.error('❌ Error in !play:', error);
+            await loadingMsg.edit('❌ Error: ' + error.message);
+        }
+        
+    } else if (command === 'skip') {
+        if (!audioPlayer || !currentSong) {
+            await message.reply('❌ Nothing is playing.');
+            return;
+        }
+        const skipped = currentSong.title;
+        audioPlayer.stop();
+        await message.reply(`⏭️ Skipped: **${skipped}**`);
+        
+    } else if (command === 'queue') {
+        if (musicQueue.length === 0 && !currentSong) {
+            await message.reply('📭 Queue is empty. Use `!play <song>` to add songs.');
+            return;
+        }
+        
+        let description = '';
+        if (currentSong) {
+            description += `🎶 **Now Playing:** ${currentSong.title} (${currentSong.duration || '?'})\n\n`;
+        }
+        if (musicQueue.length > 0) {
+            description += '**Up Next:**\n';
+            musicQueue.slice(0, 10).forEach((song, i) => {
+                description += `${i + 1}. ${song.title} (${song.duration || '?'}) — *${song.requestedBy}*\n`;
+            });
+            if (musicQueue.length > 10) {
+                description += `\n...and ${musicQueue.length - 10} more`;
+            }
+        }
+        
+        const embed = new Discord.EmbedBuilder()
+            .setColor('#5865F2')
+            .setTitle('🎵 Music Queue')
+            .setDescription(description)
+            .setFooter({ text: `${musicQueue.length} song(s) in queue` })
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        
+    } else if (command === 'np' || command === 'nowplaying') {
+        if (!currentSong) {
+            await message.reply('❌ Nothing is playing right now.');
+            return;
+        }
+        
+        const embed = new Discord.EmbedBuilder()
+            .setColor('#00FF00')
+            .setTitle('🎶 Now Playing')
+            .setDescription(`**${currentSong.title}**`)
+            .addFields(
+                { name: 'Duration', value: currentSong.duration || 'Unknown', inline: true },
+                { name: 'Requested By', value: currentSong.requestedBy, inline: true }
+            )
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        
+    } else if (command === 'clear') {
+        const count = musicQueue.length;
+        musicQueue.length = 0;
+        await message.reply(`🗑️ Cleared ${count} song(s) from the queue.`);
+    }
 }
 
 // ======================
