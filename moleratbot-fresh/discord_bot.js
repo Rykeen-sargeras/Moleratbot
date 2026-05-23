@@ -4,14 +4,18 @@ const path = require('path');
 const http = require('http');
 
 // Music dependencies
-let voice, playDl;
+// play-dl is used for YouTube searching/metadata.
+// @distube/ytdl-core is used for the actual audio stream because play-dl.stream()
+// can return ERR_INVALID_URL/input undefined on some Railway/YouTube results.
+let voice, playDl, ytdl;
 try {
     voice = require('@discordjs/voice');
     playDl = require('play-dl');
+    ytdl = require('@distube/ytdl-core');
     console.log('✅ Music dependencies loaded');
 } catch (e) {
-    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl libsodium-wrappers ffmpeg-static');
-    console.warn('Missing music dependency error:', e.message);
+    console.warn('⚠️ Music dependencies not installed. Run: npm install @discordjs/voice play-dl @distube/ytdl-core libsodium-wrappers ffmpeg-static');
+    console.warn(e.message);
 }
 
 const client = new Discord.Client({
@@ -2255,7 +2259,7 @@ async function handleMusicCommand(interaction) {
         return;
     }
     
-    if (!voice || !playDl) {
+    if (!voice || !playDl || !ytdl) {
         await interaction.reply({ content: '❌ Music dependencies not installed. Ask the bot admin to install them.', ephemeral: true });
         return;
     }
@@ -2453,9 +2457,29 @@ async function playNextSong(guild) {
             return;
         }
         
-        const stream = await playDl.stream(currentSong.url);
-        const resource = voice.createAudioResource(stream.stream, {
-            inputType: stream.type,
+        if (!ytdl.validateURL(currentSong.url)) {
+            console.error('❌ ytdl rejected URL:', currentSong.url);
+            currentSong = null;
+            if (musicQueue.length > 0) playNextSong(guild);
+            return;
+        }
+
+        // Use @distube/ytdl-core for playback. play-dl search works, but
+        // playDl.stream() was throwing ERR_INVALID_URL with input undefined.
+        const ytStream = ytdl(currentSong.url, {
+            filter: 'audioonly',
+            quality: 'highestaudio',
+            highWaterMark: 1 << 25,
+            dlChunkSize: 0,
+        });
+
+        ytStream.on('error', (streamError) => {
+            console.error('❌ YouTube stream error:', streamError);
+        });
+
+        const probed = await voice.demuxProbe(ytStream);
+        const resource = voice.createAudioResource(probed.stream, {
+            inputType: probed.type,
         });
         
         audioPlayer.play(resource);
@@ -2558,7 +2582,7 @@ function parseDurationToSeconds(duration) {
 // ======================
 
 async function handleMusicTextCommand(message, command, args) {
-    if (!voice || !playDl) {
+    if (!voice || !playDl || !ytdl) {
         await message.reply('❌ Music dependencies not installed.');
         return;
     }
